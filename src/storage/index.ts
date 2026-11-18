@@ -18,7 +18,9 @@ import type {
 mkdirSync(config.dataDir, { recursive: true });
 
 const db = new DatabaseSync(join(config.dataDir, "autocorrecoes.db"));
-db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+db.exec(
+  "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 10000;",
+);
 
 runMigrations(db);
 

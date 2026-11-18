@@ -46,11 +46,16 @@ export function createConfig(source: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Configuração inválida: ${z.prettifyError(parsed.error)}`);
   }
   const env = parsed.data;
+  // Cada arquivo de teste roda em um processo filho; isolamos o SQLite por PID
+  // para evitar "database is locked" quando o runner executa em paralelo.
+  const isTest = Boolean(source.NODE_TEST_CONTEXT || source.NODE_ENV === "test");
   return {
     ...env,
-    dataDir: env.DATA_DIR.startsWith("/")
-      ? env.DATA_DIR
-      : `${process.cwd()}/${env.DATA_DIR.replace(/^\.\//, "")}`,
+    dataDir: isTest
+      ? `${process.cwd()}/data/test-${process.pid}`
+      : env.DATA_DIR.startsWith("/")
+        ? env.DATA_DIR
+        : `${process.cwd()}/${env.DATA_DIR.replace(/^\.\//, "")}`,
     apiKeyConfigured: Boolean(env.DEEPSEEK_API_KEY && env.DEEPSEEK_API_KEY.length > 8),
   };
 }
