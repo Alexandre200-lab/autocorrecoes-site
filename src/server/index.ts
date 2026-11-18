@@ -1,0 +1,180 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import Fastify from "fastify";
+import fastifyStatic from "@fastify/static";
+import { config } from "../config/index.js";
+import { reauditFinding, runAudit } from "../pipeline/index.js";
+import { applyApproved, rollbackRun } from "../patches/index.js";
+import { events } from "../shared/events.js";
+import { newId, store } from "../storage/index.js";
+import type { AuditOptions, Domain, TargetType } from "../shared/types.js";
+import { logger } from "../observability/index.js";
+
+const dashboardDir = resolve(process.cwd(), "dashboard/dist");
+
+const FALLBACK_HTML = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AutoCorrecoes</title><style>
+body{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;max-width:720px;margin:10vh auto;padding:24px}
+code{background:#161b22;padding:2px 6px;border-radius:4px;color:#79c0ff}a{color:#79c0ff}
+</style></head><body><h1>AutoCorrecoes</h1>
+<p>API ativa. O dashboard ainda não foi compilado.</p>
+<p>Para habilitar a interface: <code>cd dashboard && npm install && npm run build</code></p>
+<p>Endpoints: <code>/api/runs</code>, <code>/api/findings</code>, <code>/api/events</code></p>
+</body></html>`;
+
+export async function startServer(port = config.PORT): Promise<void> {
+  const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
+
+  app.addHook("onRequest", async (_request, reply) => {
+    reply.header("Access-Control-Allow-Origin", "*");
+    reply.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    reply.header("Access-Control-Allow-Headers", "Content-Type");
+  });
+  app.options("/*", async (_request, reply) => reply.code(204).send());
+
+  app.get("/api/health", async () => ({ ok: true, version: "1.0.0" }));
+  app.get("/api/config", async () => ({
+    model: config.DEEPSEEK_MODEL,
+    verifyModel: config.DEEPSEEK_VERIFY_MODEL,
+    apiKeyConfigured: config.apiKeyConfigured,
+    dataDir: config.dataDir,
+  }));
+
+  app.get("/api/runs", async (request) => {
+    const query = request.query as { limit?: string };
+    return { runs: store.listRuns(Math.min(Number(query.limit) || 50, 200)) };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/runs/:id", async (request, reply) => {
+    const run = store.getRun(request.params.id);
+    if (!run) return reply.code(404).send({ error: "Execução não encontrada." });
+    return {
+      run,
+      findings: store.listFindings({ runId: run.id }),
+      receipts: store.listReceipts(run.id),
+    };
+  });
+
+  app.get("/api/findings", async (request) => {
+    const query = request.query as { runId?: string; status?: string; limit?: string };
+    return {
+      findings: store.listFindings({
+        runId: query.runId,
+        status: query.status as never,
+        limit: Math.min(Number(query.limit) || 200, 500),
+      }),
+    };
+  });
+
+  app.post("/api/audit", async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      target?: string;
+      type?: TargetType;
+      domains?: Domain[];
+      useAI?: boolean;
+    };
+    if (!body.target || typeof body.target !== "string") {
+      return reply.code(400).send({ error: "Campo 'target' é obrigatório." });
+    }
+    const options: AuditOptions = {
+      type: body.type,
+      domains: body.domains,
+      useAI: body.useAI,
+    };
+    // Execução em background: o progresso chega por /api/events (SSE).
+    setImmediate(() => {
+      void runAudit(body.target as string, options).catch((error: unknown) => {
+        events.emitEvent({
+          type: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    });
+    return reply.code(202).send({ started: true, target: body.target });
+  });
+
+  async function setFindingStatus(
+    id: string,
+    status: "approved" | "rejected",
+    reason: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const finding = store.getFinding(id);
+    if (!finding) return { ok: false, error: "Achado não encontrado." };
+    store.updateFinding(id, {
+      status,
+      rejectionReason: status === "rejected" ? reason : "",
+    });
+    store.addReceipt({
+      id: newId("rcpt"),
+      runId: finding.runId,
+      findingId: finding.id,
+      kind: status === "approved" ? "approval" : "rejection",
+      payload: { status, reason, humanDecision: true },
+      createdAt: new Date().toISOString(),
+    });
+    events.emitEvent({
+      type: "finding:updated",
+      runId: finding.runId,
+      findingId: finding.id,
+      status,
+    });
+    return { ok: true };
+  }
+
+  app.post<{ Params: { id: string } }>("/api/findings/:id/approve", async (request) =>
+    setFindingStatus(request.params.id, "approved", ""),
+  );
+
+  app.post<{ Params: { id: string } }>("/api/findings/:id/reject", async (request) => {
+    const body = (request.body ?? {}) as { reason?: string };
+    return setFindingStatus(request.params.id, "rejected", body.reason ?? "Rejeitado no dashboard");
+  });
+
+  app.post("/api/apply", async (request) => {
+    const body = (request.body ?? {}) as { runId?: string; reaudit?: boolean };
+    const results = await applyApproved(body.runId);
+    if (body.reaudit) {
+      for (const result of results) {
+        if (!result.applied) continue;
+        const finding = store.getFinding(result.findingId);
+        if (finding && !finding.patch?.exportedArtifact) await reauditFinding(finding);
+      }
+    }
+    return { results };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/runs/:id/rollback", async (request) => ({
+    restored: rollbackRun(request.params.id),
+  }));
+
+  app.get("/api/events", (_request, reply) => {
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    reply.raw.write(": conectado\n\n");
+    const unsubscribe = events.onEvent((event) => {
+      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    });
+    const heartbeat = setInterval(() => reply.raw.write(": ping\n\n"), 20_000);
+    _request.raw.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
+  });
+
+  if (existsSync(resolve(dashboardDir, "index.html"))) {
+    await app.register(fastifyStatic, { root: dashboardDir, prefix: "/" });
+    app.setNotFoundHandler((_request, reply) => reply.sendFile("index.html"));
+  } else {
+    app.get("/", async (_request, reply) => reply.type("text/html").send(FALLBACK_HTML));
+  }
+
+  await app.listen({ port, host: config.HOST });
+  logger.info("server.started", { port, host: config.HOST, dashboard: existsSync(dashboardDir) });
+  console.log(`AutoCorrecoes API + dashboard: http://${config.HOST}:${port}`);
+}
