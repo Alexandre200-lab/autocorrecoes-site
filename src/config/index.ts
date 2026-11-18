@@ -22,6 +22,8 @@ const EnvSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(4310),
   HOST: z.string().min(1).default("127.0.0.1"),
   AUDIT_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  /** Requisições por minuto por cliente na API (0 desliga). */
+  RATE_LIMIT_MAX: z.coerce.number().int().min(0).default(120),
   PLAYWRIGHT_HEADLESS: boolString.default(true),
   PLAYWRIGHT_VIEWPORT: z.string().default("1440x900"),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().trim().default(""),

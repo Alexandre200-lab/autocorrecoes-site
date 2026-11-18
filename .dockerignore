@@ -1,0 +1,11 @@
+.git
+.gitignore
+node_modules
+dashboard/node_modules
+dist
+dashboard/dist
+data
+.env
+*.log
+coverage
+eval/last-report.json

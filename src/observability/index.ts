@@ -4,7 +4,6 @@ import { randomBytes } from "node:crypto";
 import { config } from "../config/index.js";
 
 const logFile = join(config.dataDir, "audit.jsonl");
-const otlpEndpoint = config.OTEL_EXPORTER_OTLP_ENDPOINT.replace(/\/$/, "");
 
 export function newTraceId(): string {
   return randomBytes(16).toString("hex");
@@ -43,7 +42,7 @@ export const logger = {
   debug: (event: string, data?: Record<string, unknown>) => write("debug", event, data),
 };
 
-/** Span JSONL compatível com o modelo OTLP; exportação best-effort se configurada. */
+/** Spans em JSONL local; a exportação OTLP é feita pelo SDK em otel.ts. */
 export async function span<T>(
   name: string,
   fn: () => Promise<T> | T,
@@ -57,7 +56,6 @@ export async function span<T>(
     const result = await fn();
     const durationMs = Math.round(performance.now() - started);
     write("info", "span.end", { traceId, spanId, name, durationMs, status: "ok", attributes });
-    void exportOtlp(name, traceId, spanId, durationMs, "OK", attributes);
     return result;
   } catch (error) {
     const durationMs = Math.round(performance.now() - started);
@@ -70,58 +68,8 @@ export async function span<T>(
       message: error instanceof Error ? error.message : String(error),
       attributes,
     });
-    void exportOtlp(name, traceId, spanId, durationMs, "ERROR", attributes);
     throw error;
   }
 }
 
-async function exportOtlp(
-  name: string,
-  traceId: string,
-  spanId: string,
-  durationMs: number,
-  status: string,
-  attributes: Record<string, unknown>,
-): Promise<void> {
-  if (!otlpEndpoint) return;
-  try {
-    await fetch(`${otlpEndpoint}/v1/traces`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        resourceSpans: [
-          {
-            resource: { attributes: [{ key: "service.name", value: { stringValue: "autocorrecoes" } }] },
-            scopeSpans: [
-              {
-                spans: [
-                  {
-                    traceId,
-                    spanId,
-                    name,
-                    startTimeUnixNano: String(Date.now() * 1_000_000),
-                    endTimeUnixNano: String((Date.now() + durationMs) * 1_000_000),
-                    status: { code: status },
-                    attributes: Object.entries(attributes)
-                      .filter(([, v]) => typeof v === "string" || typeof v === "number" || typeof v === "boolean")
-                      .map(([key, value]) => ({
-                        key,
-                        value:
-                          typeof value === "number"
-                            ? { intValue: String(value) }
-                            : typeof value === "boolean"
-                              ? { boolValue: value }
-                              : { stringValue: String(value) },
-                      })),
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      }),
-    });
-  } catch {
-    // Exportação remota é opcional.
-  }
-}
+

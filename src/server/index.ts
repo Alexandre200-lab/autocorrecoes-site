@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
+import swagger from "@fastify/swagger";
+import swaggerUI from "@fastify/swagger-ui";
 import { config } from "../config/index.js";
 import { reauditFinding, runAudit } from "../pipeline/index.js";
 import { applyApproved, rollbackRun } from "../patches/index.js";
@@ -28,6 +30,23 @@ code{background:#161b22;padding:2px 6px;border-radius:4px;color:#79c0ff}a{color:
 export async function startServer(port = config.PORT): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
 
+  await app.register(swagger, {
+    openapi: {
+      info: {
+        title: "AutoCorrecoes API",
+        version: "1.0.0",
+        description: "Auditoria e autocorreção de sites com fiscalização DeepSeek.",
+      },
+      tags: [
+        { name: "audits", description: "Execuções e fila de auditorias" },
+        { name: "findings", description: "Achados e decisões humanas" },
+        { name: "system", description: "Saúde, métricas e eventos" },
+      ],
+    },
+  });
+  await app.register(swaggerUI, { routePrefix: "/docs" });
+
+  const rateHits = new Map<string, { count: number; resetAt: number }>();
   const publicRoutes = new Set(["/api/health", "/api/config"]);
   app.addHook("onRequest", async (request, reply) => {
     reply.header("Access-Control-Allow-Origin", "*");
@@ -35,7 +54,28 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
     const path = request.url.split("?")[0];
-    if (!config.API_TOKEN || !path.startsWith("/api/") || publicRoutes.has(path)) return;
+    const isPublicDocs = path.startsWith("/docs") || path.startsWith("/openapi");
+    const isApi = path.startsWith("/api/");
+    const isPublic = publicRoutes.has(path) || isPublicDocs;
+
+    if (config.RATE_LIMIT_MAX > 0 && isApi && !isPublic) {
+      const key = String(request.headers["x-forwarded-for"] ?? request.ip);
+      const now = Date.now();
+      let entry = rateHits.get(key);
+      if (!entry || now > entry.resetAt) {
+        entry = { count: 0, resetAt: now + 60_000 };
+        rateHits.set(key, entry);
+      }
+      entry.count += 1;
+      if (entry.count > config.RATE_LIMIT_MAX) {
+        return reply
+          .code(429)
+          .header("Retry-After", String(Math.ceil((entry.resetAt - now) / 1000)))
+          .send({ error: "Muitas requisições. Tente novamente em instantes." });
+      }
+    }
+
+    if (!config.API_TOKEN || !isApi || isPublic) return;
     const query = request.query as { token?: string } | undefined;
     const header = request.headers.authorization;
     const token = header?.startsWith("Bearer ") ? header.slice(7) : query?.token;
@@ -96,6 +136,22 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
 
   app.post("/api/audit", {
     schema: {
+      tags: ["audits"],
+      summary: "Enfileira uma auditoria",
+      response: {
+        202: {
+          type: "object",
+          properties: {
+            started: { type: "boolean" },
+            jobId: { type: "string" },
+            target: { type: "string" },
+          },
+        },
+        400: {
+          type: "object",
+          properties: { error: { type: "string" } },
+        },
+      },
       body: {
         type: "object",
         required: ["target"],
@@ -193,6 +249,8 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
 
   app.post("/api/apply", {
     schema: {
+      tags: ["findings"],
+      summary: "Aplica patches aprovados",
       body: {
         type: "object",
         additionalProperties: false,

@@ -40,6 +40,13 @@ Dashboard (interface web):
 cd dashboard && npm install && npm run build && cd ..
 ```
 
+Docker (API + dashboard + Chromium +Volume SQLite):
+
+```bash
+docker compose up -d --build
+# http://127.0.0.1:4310  ·  docs em /docs
+```
+
 ---
 
 ## Uso rápido
@@ -182,6 +189,11 @@ Defina `API_TOKEN` no `.env`. Todas as rotas `/api/*` (exceto `/api/health` e `/
 passam a exigir `Authorization: Bearer <token>`. No dashboard, um campo de acesso aparece e o
 token fica no `localStorage`. Para SSE, o token pode ser passado como `?token=` (EventSource
 não permite custom headers).
+
+- **Documentação interativa:** `http://127.0.0.1:4310/docs` (OpenAPI gerado dos schemas Fastify).
+- **Rate limit:** `RATE_LIMIT_MAX` requisições por minuto por IP (padrão 120; `0` desliga).
+- **Tracing:** defina `OTEL_EXPORTER_OTLP_ENDPOINT` para ativar o SDK oficial do OpenTelemetry
+  (instrumentação automática de HTTP/fetch + spans locais em `data/audit.jsonl`).
 
 > Em pipelines de CI, invoque `node dist/cli/index.js` (ou `npx tsx src/cli/index.ts`) em vez de
 > `npm run cli --` — o npm imprime cabeçalhos no stdout e pode corromper relatórios SARIF/JSON.

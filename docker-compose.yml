@@ -1,0 +1,22 @@
+services:
+  autocorrecoes:
+    build: .
+    image: autocorrecoes:1.0.0
+    ports:
+      - "4310:4310"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4310
+      DATA_DIR: /app/data
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-flash}
+      API_TOKEN: ${API_TOKEN:-}
+      AI_BUDGET_USD: ${AI_BUDGET_USD:-2}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    volumes:
+      - autocorrecoes-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  autocorrecoes-data:

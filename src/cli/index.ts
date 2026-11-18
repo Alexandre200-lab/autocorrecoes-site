@@ -10,6 +10,7 @@ import { applyApproved, rollbackRun } from "../patches/index.js";
 import { newId, store } from "../storage/index.js";
 import { toSarif } from "../report/sarif.js";
 import { fingerprint } from "../pipeline/fingerprint.js";
+import { startOtel } from "../observability/otel.js";
 import type { Domain, Finding, TargetType } from "../shared/types.js";
 
 const program = new Command();
@@ -351,6 +352,7 @@ program
     );
   });
 
+startOtel();
 program.parseAsync(process.argv).catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
