@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
-import type { Domain, Severity } from "../shared/types.js";
+import type { Severity } from "../shared/types.js";
 
 /** Configuração opcional por projeto: .autocorrecoes.yml na raiz do alvo. */
 

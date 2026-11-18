@@ -7,7 +7,7 @@ import { createHash, randomBytes } from "node:crypto";
 import swagger from "@fastify/swagger";
 import swaggerUI from "@fastify/swagger-ui";
 import { config } from "../config/index.js";
-import { reauditFinding, runAudit } from "../pipeline/index.js";
+import { reauditFinding } from "../pipeline/index.js";
 import { applyApproved, rollbackRun } from "../patches/index.js";
 import { events } from "../shared/events.js";
 import { newId, store } from "../storage/index.js";
@@ -58,6 +58,16 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
   const SESSION_COOKIE = "autocorrecoes_session";
   const SESSION_MAX_AGE = 8 * 60 * 60;
   const SSE_TICKET_TTL = 5 * 60 * 1000;
+  const cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, expires] of sseTickets) {
+      if (expires < now) sseTickets.delete(key);
+    }
+    for (const [key, entry] of rateHits) {
+      if (entry.resetAt < now) rateHits.delete(key);
+    }
+  }, 60_000);
+  cleanupTimer.unref?.();
   const publicRoutes = new Set([
     "/api/health",
     "/api/config",
@@ -454,6 +464,7 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
   }
 
   app.addHook("onClose", async () => {
+    clearInterval(cleanupTimer);
     stopWorker();
     stopScheduler();
   });

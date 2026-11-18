@@ -13,12 +13,14 @@
   "scripts": {
     "dev": "tsx watch src/cli/index.ts serve",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/cli/index.js",
+    "start": "node dist/cli/index.js serve",
     "cli": "tsx src/cli/index.ts",
     "test": "tsx --test tests/*.test.ts",
+    "lint": "eslint src tests scripts",
+    "lint:fix": "eslint src tests scripts --fix",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "eval": "tsx scripts/eval.ts",
-    "eval:mock": "EVAL_MOCK=1 tsx scripts/eval.ts",
+    "eval:mock": "tsx scripts/eval-mock.ts",
     "doctor": "tsx src/cli/index.ts doctor"
   },
   "keywords": [
@@ -54,7 +56,9 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "eslint": "^9.39.5",
     "tsx": "^4.20.6",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.73.0"
   }
 }

@@ -43,7 +43,7 @@ export class DesignAuditor implements Auditor {
       });
       return { signals, checksRun, checksNotRun, context: message };
     }
-    let contextLines = [`Alvo: ${url}`, `TraceId: ${ctx.traceId}`];
+    const contextLines = [`Alvo: ${url}`, `TraceId: ${ctx.traceId}`];
     const screenshotDir = join(config.dataDir, "screenshots", ctx.runId);
     mkdirSync(screenshotDir, { recursive: true });
 

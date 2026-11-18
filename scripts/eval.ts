@@ -53,7 +53,7 @@ const mockProvider: AiProvider = {
           sourceRuleId: rule,
           signalIndex: 1,
           domain: testCase.domain,
-          severity: "P3",
+          severity: (testCase.expectedSeverity ?? "P3") as RawSignal["severity"],
           title: `Achado de teste ${rule}`,
           observedBehavior: "Comportamento observado no sinal determinístico.",
           impact: "Impacto representativo para avaliação do fiscalizador.",
@@ -112,6 +112,8 @@ async function main(): Promise<void> {
   let falseNegatives = 0;
   let blocksOk = 0;
   let blocksTotal = 0;
+  let severityHits = 0;
+  let severityTotal = 0;
 
   for (const testCase of cases) {
     const run = makeRun(testCase);
@@ -125,6 +127,10 @@ async function main(): Promise<void> {
     if (testCase.expectSuppressionBlocked) {
       blocksTotal += 1;
       if (!produced) blocksOk += 1;
+    }
+    if (testCase.expectedFinding && testCase.expectedSeverity && findings.length > 0) {
+      severityTotal += 1;
+      if (findings[0].severity === testCase.expectedSeverity) severityHits += 1;
     }
 
     results.push({
@@ -144,7 +150,10 @@ async function main(): Promise<void> {
   const recall = truePositives / (truePositives + falseNegatives || 1);
   const minPrecision = Number(process.env.EVAL_MIN_PRECISION ?? 0.7);
   const minRecall = Number(process.env.EVAL_MIN_RECALL ?? 0.7);
-  const passed = precision >= minPrecision && recall >= minRecall;
+  const minSeverity = Number(process.env.EVAL_MIN_SEVERITY_ACCURACY ?? 0.6);
+  const severityAccuracy = severityTotal ? severityHits / severityTotal : 1;
+  const passed =
+    precision >= minPrecision && recall >= minRecall && severityAccuracy >= minSeverity;
   const report = {
     generatedAt: new Date().toISOString(),
     provider: provider.name,
@@ -153,7 +162,8 @@ async function main(): Promise<void> {
     precision: Number(precision.toFixed(3)),
     recall: Number(recall.toFixed(3)),
     suppressionBlocks: `${blocksOk}/${blocksTotal}`,
-    thresholds: { precision: minPrecision, recall: minRecall },
+    severityAccuracy: Number(severityAccuracy.toFixed(3)),
+    thresholds: { precision: minPrecision, recall: minRecall, severity: minSeverity },
     passed,
     costUsd: Number(getBudget().spentUsd.toFixed(6)),
   };
@@ -163,6 +173,7 @@ async function main(): Promise<void> {
   console.log(
     `\nPrecisão: ${report.precision} (mín ${minPrecision}) | ` +
       `Recall: ${report.recall} (mín ${minRecall}) | ` +
+      `Severidade: ${report.severityAccuracy} (mín ${minSeverity}) | ` +
       `Supressões bloqueadas: ${report.suppressionBlocks} | Custo: $${report.costUsd}`,
   );
   console.log(`Relatório: eval/last-report.json`);

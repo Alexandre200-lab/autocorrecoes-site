@@ -4,7 +4,6 @@ import { resolve } from "node:path";
 import YAML from "yaml";
 import { Command } from "commander";
 import { config } from "../config/index.js";
-import { getBudget } from "../ai/client.js";
 import { reauditFinding, runAudit } from "../pipeline/index.js";
 import { applyApproved, rollbackRun } from "../patches/index.js";
 import { newId, store } from "../storage/index.js";

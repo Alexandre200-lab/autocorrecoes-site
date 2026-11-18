@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
+# Árvore de produção separada: a runtime não precisa de tsx/tsc/eslint.
+RUN mkdir -p /tmp/prod && cp package.json package-lock.json /tmp/prod/ \
+    && cd /tmp/prod && npm ci --omit=dev --no-audit --no-fund
+
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
@@ -30,7 +34,7 @@ ENV NODE_ENV=production \
     PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
 
 COPY package.json package-lock.json ./
-COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /tmp/prod/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/dashboard/dist ./dashboard/dist
 COPY --from=build /root/.cache/ms-playwright /root/.cache/ms-playwright
