@@ -100,6 +100,22 @@ export const migrations: Migration[] = [
     },
   },
   {
+    version: 4,
+    name: "job-retry-and-dead-letter",
+    up(db) {
+      if (!columnExists(db, "jobs", "max_attempts")) {
+        db.exec("ALTER TABLE jobs ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3");
+      }
+      if (!columnExists(db, "jobs", "next_run_at")) {
+        db.exec("ALTER TABLE jobs ADD COLUMN next_run_at TEXT");
+      }
+      if (!columnExists(db, "jobs", "dead_letter")) {
+        db.exec("ALTER TABLE jobs ADD COLUMN dead_letter INTEGER NOT NULL DEFAULT 0");
+      }
+      db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_retry ON jobs(status, next_run_at)");
+    },
+  },
+  {
     version: 3,
     name: "durable-jobs-and-events",
     up(db) {

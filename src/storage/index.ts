@@ -345,41 +345,89 @@ export const store = {
 
   enqueueJob(job: Job): void {
     db.prepare(
-      `INSERT INTO jobs (id, target, options, status, attempts, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(job.id, job.target, JSON.stringify(job.options), "queued", 0, job.createdAt);
+      `INSERT INTO jobs (id, target, options, status, attempts, max_attempts, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      job.id,
+      job.target,
+      JSON.stringify(job.options),
+      "queued",
+      0,
+      job.maxAttempts ?? 3,
+      job.createdAt,
+    );
   },
 
   claimNextJob(): Job | null {
     return this.transaction(() => {
       const row = db
-        .prepare("SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1")
-        .get() as Record<string, unknown> | undefined;
+        .prepare(
+          `SELECT * FROM jobs
+           WHERE status = 'queued' AND dead_letter = 0
+             AND (next_run_at IS NULL OR next_run_at <= ?)
+           ORDER BY created_at LIMIT 1`,
+        )
+        .get(new Date().toISOString()) as Record<string, unknown> | undefined;
       if (!row) return null;
-      db.prepare("UPDATE jobs SET status = 'running', started_at = ?, attempts = attempts + 1 WHERE id = ?")
-        .run(new Date().toISOString(), String(row.id));
+      db.prepare(
+        "UPDATE jobs SET status = 'running', started_at = ?, next_run_at = NULL, attempts = attempts + 1 WHERE id = ?",
+      ).run(new Date().toISOString(), String(row.id));
       return {
         id: String(row.id),
         target: String(row.target),
         options: parse<Job["options"]>(row.options, {}),
         status: "running" as const,
         attempts: Number(row.attempts) + 1,
+        maxAttempts: Number(row.max_attempts ?? 3),
         createdAt: String(row.created_at),
         startedAt: new Date().toISOString(),
       };
     });
   },
 
-  updateJob(id: string, patch: Partial<Pick<Job, "status" | "runId" | "error" | "finishedAt">>): void {
+  updateJob(
+    id: string,
+    patch: Partial<
+      Pick<Job, "status" | "runId" | "error" | "finishedAt" | "nextRunAt" | "deadLetter">
+    >,
+  ): void {
+    const current = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!current) return;
+    const now = new Date().toISOString();
+    const finishedAt =
+      patch.finishedAt ??
+      (patch.status === "done" || patch.status === "failed"
+        ? now
+        : (current.finished_at as string | null));
     db.prepare(
-      `UPDATE jobs SET status = ?, run_id = ?, error = ?, finished_at = ? WHERE id = ?`,
+      `UPDATE jobs SET status = ?, run_id = ?, error = ?, finished_at = ?,
+        next_run_at = ?, dead_letter = ? WHERE id = ?`,
     ).run(
-      patch.status ?? "done",
-      patch.runId ?? null,
-      patch.error ?? null,
-      patch.finishedAt ?? new Date().toISOString(),
+      patch.status ?? String(current.status),
+      patch.runId ?? (current.run_id as string | null),
+      patch.error ?? (current.error as string | null),
+      finishedAt,
+      patch.nextRunAt ?? (current.next_run_at as string | null),
+      patch.deadLetter === undefined
+        ? Number(current.dead_letter ?? 0)
+        : patch.deadLetter
+          ? 1
+          : 0,
       id,
     );
+  },
+
+  /** Reabre um job da dead-letter com orçamento de tentativas renovado. */
+  retryJob(id: string): boolean {
+    const result = db
+      .prepare(
+        `UPDATE jobs SET status = 'queued', dead_letter = 0, next_run_at = NULL,
+          attempts = 0, error = NULL, started_at = NULL, finished_at = NULL WHERE id = ?`,
+      )
+      .run(id);
+    return Number(result.changes ?? 0) > 0;
   },
 
   getJob(id: string): Job | null {
@@ -387,10 +435,14 @@ export const store = {
     return row ? this.toJob(row) : null;
   },
 
-  listJobs(limit = 50): Job[] {
-    const rows = db
-      .prepare("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?")
-      .all(limit) as Array<Record<string, unknown>>;
+  listJobs(limit = 50, deadLetter?: boolean): Job[] {
+    const rows = (
+      deadLetter === undefined
+        ? db.prepare("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?").all(limit)
+        : db
+            .prepare("SELECT * FROM jobs WHERE dead_letter = ? ORDER BY created_at DESC LIMIT ?")
+            .all(deadLetter ? 1 : 0, limit)
+    ) as Array<Record<string, unknown>>;
     return rows.map((row) => this.toJob(row));
   },
 
@@ -411,6 +463,9 @@ export const store = {
       runId: (row.run_id as string | null) ?? undefined,
       error: (row.error as string | null) ?? undefined,
       attempts: Number(row.attempts ?? 0),
+      maxAttempts: Number(row.max_attempts ?? 3),
+      nextRunAt: (row.next_run_at as string | null) ?? undefined,
+      deadLetter: Number(row.dead_letter ?? 0) === 1,
       createdAt: String(row.created_at),
       startedAt: (row.started_at as string | null) ?? undefined,
       finishedAt: (row.finished_at as string | null) ?? undefined,

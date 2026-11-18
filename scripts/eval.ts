@@ -19,7 +19,9 @@ interface EvalCase {
   domain: Domain;
   ruleId: string;
   expectedFinding: boolean;
+  expectedSeverity?: string;
   expectSuppressionBlocked?: boolean;
+  requiresHuman?: boolean;
 }
 
 const cases = JSON.parse(
@@ -84,6 +86,7 @@ function makeRun(testCase: EvalCase): AuditRun {
     url: testCase.domain === "code" ? undefined : "https://example.com",
     path: testCase.domain === "code" ? "app.js" : undefined,
     evidence: `evidência determinística de ${testCase.ruleId}`,
+    metadata: testCase.requiresHuman ? { requiresHuman: true } : undefined,
   };
   const run: AuditRun = {
     id: newId("eval"),
@@ -139,6 +142,9 @@ async function main(): Promise<void> {
 
   const precision = truePositives / (truePositives + falsePositives || 1);
   const recall = truePositives / (truePositives + falseNegatives || 1);
+  const minPrecision = Number(process.env.EVAL_MIN_PRECISION ?? 0.7);
+  const minRecall = Number(process.env.EVAL_MIN_RECALL ?? 0.7);
+  const passed = precision >= minPrecision && recall >= minRecall;
   const report = {
     generatedAt: new Date().toISOString(),
     provider: provider.name,
@@ -147,13 +153,23 @@ async function main(): Promise<void> {
     precision: Number(precision.toFixed(3)),
     recall: Number(recall.toFixed(3)),
     suppressionBlocks: `${blocksOk}/${blocksTotal}`,
+    thresholds: { precision: minPrecision, recall: minRecall },
+    passed,
     costUsd: Number(getBudget().spentUsd.toFixed(6)),
   };
   const dir = join(process.cwd(), "eval");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "last-report.json"), `${JSON.stringify(report, null, 2)}\n`);
-  console.log(`\nPrecisão: ${report.precision} | Recall: ${report.recall} | Custo: $${report.costUsd}`);
+  console.log(
+    `\nPrecisão: ${report.precision} (mín ${minPrecision}) | ` +
+      `Recall: ${report.recall} (mín ${minRecall}) | ` +
+      `Supressões bloqueadas: ${report.suppressionBlocks} | Custo: $${report.costUsd}`,
+  );
   console.log(`Relatório: eval/last-report.json`);
+  if (!passed) {
+    console.error("Gate de qualidade da IA FALHOU. Ajuste prompts/modelo antes de publicar.");
+    process.exitCode = 1;
+  }
 }
 
 main().catch((error) => {

@@ -19,9 +19,23 @@ async function execute(job: Job): Promise<void> {
     events.emitEvent({ type: "job:finished", jobId: job.id, runId: outcome.run.id });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    store.updateJob(job.id, { status: "failed", error: message });
-    events.emitEvent({ type: "job:failed", jobId: job.id, message });
-    logger.error("worker.job.failed", { jobId: job.id, message });
+    const maxAttempts = job.maxAttempts ?? 3;
+    if (job.attempts < maxAttempts) {
+      const delayMs = 2 ** job.attempts * 1000;
+      const nextRunAt = new Date(Date.now() + delayMs).toISOString();
+      store.updateJob(job.id, { status: "queued", error: message, nextRunAt });
+      events.emitEvent({
+        type: "job:retry",
+        jobId: job.id,
+        attempt: job.attempts,
+        nextRunAt,
+      });
+      logger.warn("worker.job.retry", { jobId: job.id, attempt: job.attempts, delayMs });
+    } else {
+      store.updateJob(job.id, { status: "failed", error: message, deadLetter: true });
+      events.emitEvent({ type: "job:failed", jobId: job.id, message });
+      logger.error("worker.job.dead_letter", { jobId: job.id, message });
+    }
   } finally {
     active -= 1;
   }

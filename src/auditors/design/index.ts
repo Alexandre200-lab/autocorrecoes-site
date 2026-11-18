@@ -99,6 +99,26 @@ export class DesignAuditor implements Auditor {
           ...(options.project?.headers ? { extraHTTPHeaders: options.project.headers } : {}),
         });
         const page = await browserContext.newPage();
+        if (!options.allowPrivateHosts) {
+          // Bloqueia navegações e redirects para hosts internos (inclusive via JS).
+          const hostCache = new Map<string, boolean>();
+          await page.route("**/*", async (route) => {
+            const target = route.request().url();
+            if (!/^https?:\/\//i.test(target)) return route.abort();
+            const host = new URL(target).hostname.replace(/^\[|\]$/g, "");
+            let allowed = hostCache.get(host);
+            if (allowed === undefined) {
+              try {
+                await assertPublicUrl(target, false);
+                allowed = true;
+              } catch {
+                allowed = false;
+              }
+              hostCache.set(host, allowed);
+            }
+            return allowed ? route.continue() : route.abort();
+          });
+        }
         try {
           await page.goto(url, {
             waitUntil: "domcontentloaded",

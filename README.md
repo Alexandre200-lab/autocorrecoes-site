@@ -153,7 +153,7 @@ Backups ficam em `data/backups/<runId>/<findingId>/`. Patches para alvos remotos
 
 - Chave apenas em `.env` (nunca no código, nunca enviada ao alvo).
 - **Redação de segredos** antes de qualquer trecho do alvo sair do processo (`src/security/redact.ts`), aplicada tanto no auditor quanto no cliente de IA (defesa em profundidade).
-- **Proteção SSRF**: hosts loopback/privados/link-local são bloqueados por padrão (`src/security/network.ts`); use `--allow-private-hosts` apenas em testes locais.
+- **Proteção SSRF**: hosts loopback/privados/link-local são bloqueados por padrão (`src/security/network.ts`). Cada **redirect é revalidado** e o IP resolvido é **fixado na conexão** (anti DNS-rebinding), tanto no auditor HTTP quanto nas navegações do Playwright. Use `--allow-private-hosts` apenas em testes locais.
 - `safeResolve` usa `realpath` para impedir escape por **symlink**.
 - Conteúdo de código/HTML/diff tratado como **dado não confiável** e delimitado antes do prompt.
 - Anti-supressão cobre `aria-hidden`, `display:none`, `visibility`, `opacity:0`, `pointer-events`, `inert`, `disableRules`, `eslint-disable`, `@ts-*` e desligamento de testes/CI.
@@ -171,8 +171,9 @@ Backups ficam em `data/backups/<runId>/<findingId>/`. Patches para alvos remotos
 | Método | Rota | Descrição |
 |---|---|---|
 | `POST` | `/api/audit` | Enfileira auditoria (`{ target, type?, domains?, useAI?, allowPrivateHosts? }`) → `{ jobId }` |
-| `GET` | `/api/jobs` | Lista jobs da fila durável |
+| `GET` | `/api/jobs?dead=true` | Lista jobs da fila durável (filtro de dead-letter) |
 | `GET` | `/api/jobs/:id` | Status de um job (inclui `runId` ao concluir) |
+| `POST` | `/api/jobs/:id/retry` | Reabre um job da dead-letter |
 | `GET` | `/api/runs` | Lista execuções |
 | `GET` | `/api/runs/:id` | Execução + achados + receipts |
 | `GET` | `/api/findings` | Lista achados (`?runId=&status=`) |
@@ -191,6 +192,7 @@ token fica no `localStorage`. Para SSE, o token pode ser passado como `?token=` 
 não permite custom headers).
 
 - **Documentação interativa:** `http://127.0.0.1:4310/docs` (OpenAPI gerado dos schemas Fastify).
+- **Fila com retry:** até 3 tentativas com backoff exponencial; após isso o job vai para a **dead-letter**. Reabra com `npm run cli -- retry <jobId>` (ou `POST /api/jobs/:id/retry`).
 - **Rate limit:** `RATE_LIMIT_MAX` requisições por minuto por IP (padrão 120; `0` desliga).
 - **Tracing:** defina `OTEL_EXPORTER_OTLP_ENDPOINT` para ativar o SDK oficial do OpenTelemetry
   (instrumentação automática de HTTP/fetch + spans locais em `data/audit.jsonl`).
@@ -202,14 +204,18 @@ não permite custom headers).
 
 ## Avaliação da qualidade da IA
 
-O dataset em `eval/cases.json` mede precisão, recall e bloqueio de patches supressivos:
+O dataset em `eval/cases.json` (21 casos rotulados de design/backend/código) mede precisão,
+recall e bloqueio de patches supressivos:
 
 ```bash
-EVAL_MOCK=1 npm run eval   # valida o harness sem gastar tokens
-npm run eval               # usa DeepSeek real (consome orçamento)
+npm run eval:mock   # valida o harness sem gastar tokens
+npm run eval        # usa DeepSeek real (consome orçamento)
 ```
 
-O relatório é gravado em `eval/last-report.json`.
+O gate falha com exit code 1 se precisão ou recall ficarem abaixo dos mínimos
+(`EVAL_MIN_PRECISION` e `EVAL_MIN_RECALL`, padrão `0.7`). O relatório é gravado em
+`eval/last-report.json`. Há um workflow `AI quality gate` (`ai-eval.yml`) para execução
+semanal/manual com a chave real e upload do relatório como artifact.
 
 ## Testes
 

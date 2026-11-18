@@ -124,6 +124,7 @@ export type PipelineEvent =
   | { type: "job:started"; jobId: string }
   | { type: "job:finished"; jobId: string; runId: string }
   | { type: "job:failed"; jobId: string; message: string }
+  | { type: "job:retry"; jobId: string; attempt: number; nextRunAt: string }
   | { type: "error"; runId?: string; message: string };
 
 /** Evento entregue aos listeners, com id persistido para deduplicação de replay. */
@@ -137,6 +138,9 @@ export interface Job {
   runId?: string;
   error?: string;
   attempts: number;
+  maxAttempts?: number;
+  nextRunAt?: string;
+  deadLetter?: boolean;
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;

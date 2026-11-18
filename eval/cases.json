@@ -4,21 +4,151 @@
     "description": "Botão sem nome acessível deve virar achado",
     "domain": "design",
     "ruleId": "AXE_BUTTON-NAME",
-    "expectedFinding": true
+    "expectedFinding": true,
+    "expectedSeverity": "P2"
   },
   {
     "id": "a11y-contrast",
-    "description": "Contraste abaixo do mínimo deve virar achado",
+    "description": "Contraste abaixo do mínimo WCAG AA deve virar achado",
     "domain": "design",
     "ruleId": "AXE_COLOR-CONTRAST",
-    "expectedFinding": true
+    "expectedFinding": true,
+    "expectedSeverity": "P2"
+  },
+  {
+    "id": "a11y-image-alt",
+    "description": "Imagem sem texto alternativo deve virar achado",
+    "domain": "design",
+    "ruleId": "AXE_IMAGE-ALT",
+    "expectedFinding": true,
+    "expectedSeverity": "P2"
+  },
+  {
+    "id": "a11y-form-label",
+    "description": "Campo de formulário sem label deve virar achado",
+    "domain": "design",
+    "ruleId": "AXE_LABEL",
+    "expectedFinding": true,
+    "expectedSeverity": "P2"
+  },
+  {
+    "id": "a11y-lang",
+    "description": "Documento sem atributo lang deve virar achado",
+    "domain": "design",
+    "ruleId": "MISSING_LANG",
+    "expectedFinding": true,
+    "expectedSeverity": "P2"
+  },
+  {
+    "id": "a11y-h1",
+    "description": "Página sem h1 deve virar achado de severidade menor",
+    "domain": "design",
+    "ruleId": "MISSING_H1",
+    "expectedFinding": true,
+    "expectedSeverity": "P3"
+  },
+  {
+    "id": "a11y-incomplete-contrast",
+    "description": "Resultado incomplete do axe exige humana, não patch automático",
+    "domain": "design",
+    "ruleId": "AXE_INCOMPLETE_COLOR-CONTRAST",
+    "expectedFinding": false,
+    "requiresHuman": true
+  },
+  {
+    "id": "a11y-overflow",
+    "description": "Overflow horizontal no mobile deve virar achado",
+    "domain": "design",
+    "ruleId": "MOBILE_HORIZONTAL_OVERFLOW",
+    "expectedFinding": true,
+    "expectedSeverity": "P3"
   },
   {
     "id": "backend-csp",
     "description": "CSP ausente deve virar achado",
     "domain": "backend",
     "ruleId": "MISSING_HEADER_CONTENT_SECURITY_POLICY",
-    "expectedFinding": true
+    "expectedFinding": true,
+    "expectedSeverity": "P2"
+  },
+  {
+    "id": "backend-hsts",
+    "description": "HSTS ausente em HTTPS deve virar achado",
+    "domain": "backend",
+    "ruleId": "MISSING_HEADER_STRICT_TRANSPORT_SECURITY",
+    "expectedFinding": true,
+    "expectedSeverity": "P2"
+  },
+  {
+    "id": "backend-xcto",
+    "description": "X-Content-Type-Options ausente deve virar achado",
+    "domain": "backend",
+    "ruleId": "MISSING_HEADER_X_CONTENT_TYPE_OPTIONS",
+    "expectedFinding": true,
+    "expectedSeverity": "P3"
+  },
+  {
+    "id": "backend-5xx",
+    "description": "HTTP 500 na página principal é crítico",
+    "domain": "backend",
+    "ruleId": "HTTP_5XX",
+    "expectedFinding": true,
+    "expectedSeverity": "P1"
+  },
+  {
+    "id": "backend-stack-trace",
+    "description": "Stack trace exposta é crítica",
+    "domain": "backend",
+    "ruleId": "STACK_TRACE_LEAK",
+    "expectedFinding": true,
+    "expectedSeverity": "P1"
+  },
+  {
+    "id": "backend-cors",
+    "description": "CORS curinga com credenciais deve virar achado",
+    "domain": "backend",
+    "ruleId": "CORS_WILDCARD_CREDENTIALS",
+    "expectedFinding": true,
+    "expectedSeverity": "P2"
+  },
+  {
+    "id": "backend-powered-by",
+    "description": "X-Powered-By é informativo, não deve virar achado acionável",
+    "domain": "backend",
+    "ruleId": "SERVER_FINGERPRINT",
+    "expectedFinding": false
+  },
+  {
+    "id": "code-secret",
+    "description": "Secret hardcoded é crítico",
+    "domain": "code",
+    "ruleId": "POSSIBLE_HARDCODED_SECRET",
+    "expectedFinding": true,
+    "expectedSeverity": "P1"
+  },
+  {
+    "id": "code-console",
+    "description": "console.log em produção é achado de baixa severidade",
+    "domain": "code",
+    "ruleId": "CONSOLE_LOG",
+    "expectedFinding": true,
+    "expectedSeverity": "P4"
+  },
+  {
+    "id": "code-todo",
+    "description": "TODO pendente é achado de baixa severidade",
+    "domain": "code",
+    "ruleId": "TODO_MARKER",
+    "expectedFinding": true,
+    "expectedSeverity": "P4"
+  },
+  {
+    "id": "code-vulnerabilities",
+    "description": "Dependências vulneráveis devem virar achado",
+    "domain": "code",
+    "ruleId": "VULNERABLE_DEPENDENCIES",
+    "expectedFinding": true,
+    "expectedSeverity": "P2"
   },
   {
     "id": "noisy-deprecation",

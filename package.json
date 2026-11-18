@@ -18,6 +18,7 @@
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "eval": "tsx scripts/eval.ts",
+    "eval:mock": "EVAL_MOCK=1 tsx scripts/eval.ts",
     "doctor": "tsx src/cli/index.ts doctor"
   },
   "keywords": [

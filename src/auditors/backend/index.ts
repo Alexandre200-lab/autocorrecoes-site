@@ -1,5 +1,5 @@
 import { config } from "../../config/index.js";
-import { assertPublicUrl } from "../../security/network.js";
+import { assertPublicUrl, safeRequest } from "../../security/network.js";
 import { redactSecrets } from "../../security/redact.js";
 import type { AuditOptions, RawSignal } from "../../shared/types.js";
 import type { AuditContext, AuditResult, Auditor } from "../types.js";
@@ -23,20 +23,22 @@ async function probe(
   url: string,
   method = "GET",
   extraHeaders: Record<string, string> = {},
+  allowPrivateHosts = false,
 ): Promise<Probe> {
   const started = performance.now();
-  const response = await fetch(url, {
+  const response = await safeRequest(url, {
     method,
-    redirect: "follow",
-    signal: AbortSignal.timeout(Math.min(config.AUDIT_TIMEOUT_MS, 20_000)),
     headers: { "User-Agent": "AutoCorrecoes/1.0 (auditoria)", ...extraHeaders },
+    timeoutMs: Math.min(config.AUDIT_TIMEOUT_MS, 20_000),
+    allowPrivateHosts,
   });
-  const text = await response.text();
   return {
     status: response.status,
-    headers: response.headers,
+    headers: new Headers(
+      Object.entries(response.headers).map(([key, value]) => [key, String(value)] as [string, string]),
+    ),
     latencyMs: Math.round(performance.now() - started),
-    bodySnippet: redactSecrets(text.slice(0, 2000)),
+    bodySnippet: redactSecrets(response.body.slice(0, 2000)),
   };
 }
 
@@ -71,7 +73,7 @@ export class BackendAuditor implements Auditor {
 
     let main: Probe;
     try {
-      main = await probe(url, "GET", customHeaders);
+      main = await probe(url, "GET", customHeaders, options.allowPrivateHosts);
       checksRun.push("HTTP GET (página principal)");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -175,7 +177,9 @@ export class BackendAuditor implements Auditor {
     const samples = [main.latencyMs];
     for (let i = 0; i < 4; i += 1) {
       try {
-        samples.push((await probe(url, "GET", customHeaders)).latencyMs);
+        samples.push(
+          (await probe(url, "GET", customHeaders, options.allowPrivateHosts)).latencyMs,
+        );
       } catch {
         // amostra descartada
       }
@@ -197,13 +201,14 @@ export class BackendAuditor implements Auditor {
 
     if (options.allowMutatingRequests) {
       try {
-        const optionsResponse = await fetch(url, {
+        const optionsResponse = await safeRequest(url, {
           method: "OPTIONS",
           headers: customHeaders,
-          signal: AbortSignal.timeout(10_000),
+          timeoutMs: 10_000,
+          allowPrivateHosts: options.allowPrivateHosts,
         });
         checksRun.push("HTTP OPTIONS");
-        const allow = optionsResponse.headers.get("allow") ?? "";
+        const allow = String(optionsResponse.headers.allow ?? "");
         if (/\b(PUT|DELETE|PATCH)\b/i.test(allow)) {
           signals.push({
             domain: "backend",

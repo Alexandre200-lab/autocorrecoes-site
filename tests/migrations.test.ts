@@ -35,7 +35,7 @@ test("migração adiciona source_rule_id sem perder dados existentes", () => {
     assert.equal(row.id, "f1");
     assert.equal(row.source_rule_id, null);
     const applied = db.prepare("SELECT COUNT(*) AS n FROM schema_migrations").get() as { n: number };
-    assert.equal(applied.n, 3);
+    assert.equal(applied.n, 4);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

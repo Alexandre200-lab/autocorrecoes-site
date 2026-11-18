@@ -17,7 +17,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: EVAL_MOCK=1 npm run eval
+      - run: npm run eval:mock
       - run: npm run build
       - name: Dashboard
         working-directory: dashboard

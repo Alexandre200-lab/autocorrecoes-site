@@ -203,6 +203,20 @@ program
   });
 
 program
+  .command("retry")
+  .description("Reabre um job da dead-letter")
+  .argument("<jobId>")
+  .action(async (jobId: string) => {
+    const base = `http://${process.env.HOST ?? "127.0.0.1"}:${process.env.PORT ?? 4310}`;
+    const token = process.env.API_TOKEN;
+    const response = await fetch(`${base}/api/jobs/${jobId}/retry`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    console.log(response.ok ? `${jobId} reenfileirado.` : `Falha: HTTP ${response.status}`);
+  });
+
+program
   .command("baseline")
   .description("Adiciona ao .autocorrecoes.yml as fingerprints dos sinais de uma execução")
   .argument("<runId>")
@@ -231,11 +245,12 @@ program
 program
   .command("jobs")
   .description("Lista jobs da fila durável (quando o servidor está ativo)")
-  .action(async () => {
+  .option("--dead", "mostra apenas jobs na dead-letter")
+  .action(async (opts) => {
     const base = `http://${process.env.HOST ?? "127.0.0.1"}:${process.env.PORT ?? 4310}`;
     try {
       const token = process.env.API_TOKEN;
-      const response = await fetch(`${base}/api/jobs`, {
+      const response = await fetch(`${base}/api/jobs${opts.dead ? "?dead=true" : ""}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       const data = (await response.json()) as {

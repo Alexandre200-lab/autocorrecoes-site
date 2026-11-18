@@ -103,8 +103,20 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
   });
 
   app.get("/api/jobs", async (request) => {
-    const query = request.query as { limit?: string };
-    return { jobs: store.listJobs(Math.min(Number(query.limit) || 50, 200)) };
+    const query = request.query as { limit?: string; dead?: string };
+    return {
+      jobs: store.listJobs(
+        Math.min(Number(query.limit) || 50, 200),
+        query.dead === "true" ? true : query.dead === "false" ? false : undefined,
+      ),
+    };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/jobs/:id/retry", async (request, reply) => {
+    if (!store.retryJob(request.params.id)) {
+      return reply.code(404).send({ error: "Job não encontrado." });
+    }
+    return { ok: true };
   });
 
   app.get<{ Params: { id: string } }>("/api/jobs/:id", async (request, reply) => {
