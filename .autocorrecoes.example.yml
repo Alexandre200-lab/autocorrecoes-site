@@ -1,0 +1,32 @@
+# Copie para a raiz do projeto auditado como .autocorrecoes.yml
+version: 1
+
+# Paths (repos local) ou URLs (site publicado) ignorados. Suporta * e **.
+ignore:
+  - "**/node_modules/**"
+  - "src/generated/**"
+  - "https://exemplo.com/privacidade/**"
+
+# Restringe os auditores (opcional; padrão = todos disponíveis)
+# domains: [design, backend]
+
+# Ajusta a severidade de uma regra ou desliga o sinal por completo.
+rules:
+  CONSOLE_LOG: P4
+  TODO_MARKER: "off"
+  AXE_COLOR-CONTRAST: P1
+
+# Headers enviados nas requisições HTTP e no contexto do navegador.
+headers:
+  # Authorization: "Bearer seu-token-aqui"
+
+# Sessão autenticada: gere com
+#   npx playwright codegen --save-storage=auth.json https://seu-site.com
+auth:
+  # storageState: "./auth.json"
+
+# Achados conhecidos, gerados por: npm run cli -- baseline <runId>
+baseline:
+  fingerprints: []
+
+timeoutMs: 30000

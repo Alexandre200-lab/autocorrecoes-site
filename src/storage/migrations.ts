@@ -99,6 +99,36 @@ export const migrations: Migration[] = [
       db.exec("CREATE INDEX IF NOT EXISTS idx_findings_source ON findings(source_rule_id)");
     },
   },
+  {
+    version: 3,
+    name: "durable-jobs-and-events",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS jobs (
+          id TEXT PRIMARY KEY,
+          target TEXT NOT NULL,
+          options TEXT NOT NULL,
+          status TEXT NOT NULL,
+          run_id TEXT,
+          error TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+
+        CREATE TABLE IF NOT EXISTS events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT,
+          type TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

@@ -113,6 +113,25 @@ O cliente estima custo por token (tarifas de pico), registra cache hits e interr
 
 ---
 
+## Configuração por projeto (`.autocorrecoes.yml`)
+
+Copie `.autocorrecoes.example.yml` para a raiz do projeto auditado (ou para o diretório de
+trabalho, quando o alvo for uma URL). O arquivo permite:
+
+- `ignore`: globs de paths/URLs ignorados (`*`, `**`);
+- `domains`: restringe design/backend/code;
+- `rules`: ajusta severidade por regra ou usa `"off"`;
+- `headers`: headers customizados em requisições HTTP e no navegador;
+- `auth.storageState`: sessão autenticada do Playwright
+  (`npx playwright codegen --save-storage=auth.json https://seu-site.com`);
+- `baseline.fingerprints`: achados conhecidos, suprimidos nas próximas execuções;
+- `timeoutMs`: timeout de carregamento da página.
+
+```bash
+# aceitar os achados atuais como baseline conhecido
+npm run cli -- baseline <runId>
+```
+
 ## Armazenamento e audit trail
 
 SQLite nativo em `data/autocorrecoes.db` (WAL). Tabelas: `runs`, `signals`, `findings`, `receipts`.
@@ -144,7 +163,9 @@ Backups ficam em `data/backups/<runId>/<findingId>/`. Patches para alvos remotos
 
 | Método | Rota | Descrição |
 |---|---|---|
-| `POST` | `/api/audit` | Inicia auditoria em background (`{ target, type?, domains?, useAI? }`) |
+| `POST` | `/api/audit` | Enfileira auditoria (`{ target, type?, domains?, useAI?, allowPrivateHosts? }`) → `{ jobId }` |
+| `GET` | `/api/jobs` | Lista jobs da fila durável |
+| `GET` | `/api/jobs/:id` | Status de um job (inclui `runId` ao concluir) |
 | `GET` | `/api/runs` | Lista execuções |
 | `GET` | `/api/runs/:id` | Execução + achados + receipts |
 | `GET` | `/api/findings` | Lista achados (`?runId=&status=`) |
@@ -152,8 +173,15 @@ Backups ficam em `data/backups/<runId>/<findingId>/`. Patches para alvos remotos
 | `POST` | `/api/findings/:id/reject` | Rejeita |
 | `POST` | `/api/apply` | Aplica aprovados (`{ runId?, reaudit? }`) |
 | `POST` | `/api/runs/:id/rollback` | Restaura backups |
-| `GET` | `/api/events` | Server-Sent Events com progresso |
+| `GET` | `/api/events?runId=&afterId=&token=` | SSE com progresso e **replay** dos eventos persistidos |
 | `GET` | `/api/metrics` | Contadores (auditorias, achados por severidade, custo de IA, applies) |
+
+### Produção
+
+Defina `API_TOKEN` no `.env`. Todas as rotas `/api/*` (exceto `/api/health` e `/api/config`)
+passam a exigir `Authorization: Bearer <token>`. No dashboard, um campo de acesso aparece e o
+token fica no `localStorage`. Para SSE, o token pode ser passado como `?token=` (EventSource
+não permite custom headers).
 
 > Em pipelines de CI, invoque `node dist/cli/index.js` (ou `npx tsx src/cli/index.ts`) em vez de
 > `npm run cli --` — o npm imprime cabeçalhos no stdout e pode corromper relatórios SARIF/JSON.

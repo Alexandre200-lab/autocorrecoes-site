@@ -30,6 +30,11 @@ header p { margin: 4px 0 0; color: #8b949e; font-size: 13px; }
 .panel h2 { margin: 0 0 12px; font-size: 15px; text-transform: uppercase; letter-spacing: 0.6px; color: #8b949e; }
 .mt { margin-top: 24px !important; }
 
+.login { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; border-color: #d29922; }
+.login h2 { margin: 0; color: #e3b341; }
+.login p { margin: 0; flex: 1 1 100%; }
+.login input { flex: 1; min-width: 220px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; padding: 9px; }
+
 .new-audit { display: flex; gap: 10px; margin-bottom: 16px; }
 .new-audit input {
   flex: 1;

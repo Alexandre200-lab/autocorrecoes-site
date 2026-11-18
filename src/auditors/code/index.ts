@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
+import { isIgnored } from "../../config/project.js";
 import { redactSecrets } from "../../security/redact.js";
 import type { AuditOptions, RawSignal } from "../../shared/types.js";
 import type { AuditContext, AuditResult, Auditor } from "../types.js";
@@ -113,7 +114,7 @@ const PATTERNS: Array<{
 export class CodeAuditor implements Auditor {
   readonly domain = "code" as const;
 
-  async audit(target: string, _options: AuditOptions, ctx: AuditContext): Promise<AuditResult> {
+  async audit(target: string, options: AuditOptions, ctx: AuditContext): Promise<AuditResult> {
     const root = resolveLocalTarget(target);
     const signals: RawSignal[] = [];
     const checksRun: string[] = [];
@@ -228,7 +229,8 @@ export class CodeAuditor implements Auditor {
       checksNotRun.push("npm audit (sem rede ou falha)");
     }
 
-    const files = listFiles(root);
+    const ignore = options.project?.ignore ?? [];
+    const files = listFiles(root).filter((file) => !isIgnored(file, ignore));
     checksRun.push(`varredura estática (${files.length} arquivos)`);
     let snippets = "";
     for (const file of files) {

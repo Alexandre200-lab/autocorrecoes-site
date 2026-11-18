@@ -1,5 +1,7 @@
 /** Tipos compartilhados por todas as camadas do AutoCorrecoes. */
 
+import type { ProjectConfig } from "../config/project.js";
+
 export type Domain = "design" | "backend" | "code";
 export type Severity = "P1" | "P2" | "P3" | "P4";
 export type Confidence = "high" | "medium" | "low";
@@ -118,7 +120,35 @@ export type PipelineEvent =
   | { type: "finding:created"; runId: string; findingId: string; status: FindingStatus }
   | { type: "finding:updated"; runId: string; findingId: string; status: FindingStatus }
   | { type: "run:finished"; runId: string }
+  | { type: "job:queued"; jobId: string; target: string }
+  | { type: "job:started"; jobId: string }
+  | { type: "job:finished"; jobId: string; runId: string }
+  | { type: "job:failed"; jobId: string; message: string }
   | { type: "error"; runId?: string; message: string };
+
+/** Evento entregue aos listeners, com id persistido para deduplicação de replay. */
+export type DeliveredEvent = PipelineEvent & { eventId?: number; createdAt?: string };
+
+export interface Job {
+  id: string;
+  target: string;
+  options: AuditOptions;
+  status: "queued" | "running" | "done" | "failed";
+  runId?: string;
+  error?: string;
+  attempts: number;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface StoredEvent {
+  id: number;
+  runId?: string;
+  type: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
 
 export interface AuditOptions {
   type?: TargetType;
@@ -128,5 +158,7 @@ export interface AuditOptions {
   allowMutatingRequests?: boolean;
   /** Libera hosts privados/loopback (necessário para testes locais). */
   allowPrivateHosts?: boolean;
+  /** Configuração carregada de .autocorrecoes.yml do alvo. */
+  project?: ProjectConfig;
   maxPages?: number;
 }

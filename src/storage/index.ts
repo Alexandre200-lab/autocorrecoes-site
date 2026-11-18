@@ -6,10 +6,12 @@ import { runMigrations } from "./migrations.js";
 import type {
   AuditRun,
   Finding,
+  Job,
   Patch,
   RawSignal,
   Receipt,
   RunStatus,
+  StoredEvent,
 } from "../shared/types.js";
 
 mkdirSync(config.dataDir, { recursive: true });
@@ -337,6 +339,128 @@ export const store = {
       payload: parse<Record<string, unknown>>(row.payload, {}),
       createdAt: String(row.created_at),
     }));
+  },
+
+  // ---- Fila durável -------------------------------------------------------
+
+  enqueueJob(job: Job): void {
+    db.prepare(
+      `INSERT INTO jobs (id, target, options, status, attempts, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(job.id, job.target, JSON.stringify(job.options), "queued", 0, job.createdAt);
+  },
+
+  claimNextJob(): Job | null {
+    return this.transaction(() => {
+      const row = db
+        .prepare("SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1")
+        .get() as Record<string, unknown> | undefined;
+      if (!row) return null;
+      db.prepare("UPDATE jobs SET status = 'running', started_at = ?, attempts = attempts + 1 WHERE id = ?")
+        .run(new Date().toISOString(), String(row.id));
+      return {
+        id: String(row.id),
+        target: String(row.target),
+        options: parse<Job["options"]>(row.options, {}),
+        status: "running" as const,
+        attempts: Number(row.attempts) + 1,
+        createdAt: String(row.created_at),
+        startedAt: new Date().toISOString(),
+      };
+    });
+  },
+
+  updateJob(id: string, patch: Partial<Pick<Job, "status" | "runId" | "error" | "finishedAt">>): void {
+    db.prepare(
+      `UPDATE jobs SET status = ?, run_id = ?, error = ?, finished_at = ? WHERE id = ?`,
+    ).run(
+      patch.status ?? "done",
+      patch.runId ?? null,
+      patch.error ?? null,
+      patch.finishedAt ?? new Date().toISOString(),
+      id,
+    );
+  },
+
+  getJob(id: string): Job | null {
+    const row = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.toJob(row) : null;
+  },
+
+  listJobs(limit = 50): Job[] {
+    const rows = db
+      .prepare("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?")
+      .all(limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.toJob(row));
+  },
+
+  /** Reconcilia jobs órfãos de um processo anterior. */
+  recoverJobs(): number {
+    const result = db
+      .prepare("UPDATE jobs SET status = 'queued', started_at = NULL WHERE status = 'running'")
+      .run();
+    return Number(result.changes ?? 0);
+  },
+
+  toJob(row: Record<string, unknown>): Job {
+    return {
+      id: String(row.id),
+      target: String(row.target),
+      options: parse<Job["options"]>(row.options, {}),
+      status: row.status as Job["status"],
+      runId: (row.run_id as string | null) ?? undefined,
+      error: (row.error as string | null) ?? undefined,
+      attempts: Number(row.attempts ?? 0),
+      createdAt: String(row.created_at),
+      startedAt: (row.started_at as string | null) ?? undefined,
+      finishedAt: (row.finished_at as string | null) ?? undefined,
+    };
+  },
+
+  // ---- Eventos persistidos ------------------------------------------------
+
+  insertEvent(event: { runId?: string; type: string; payload: Record<string, unknown> }): StoredEvent {
+    const createdAt = new Date().toISOString();
+    const result = db
+      .prepare("INSERT INTO events (run_id, type, payload, created_at) VALUES (?, ?, ?, ?)")
+      .run(event.runId ?? null, event.type, JSON.stringify(event.payload), createdAt);
+    return {
+      id: Number(result.lastInsertRowid),
+      runId: event.runId,
+      type: event.type,
+      payload: event.payload,
+      createdAt,
+    };
+  },
+
+  listEvents(filter: { runId?: string; afterId?: number; limit?: number } = {}): StoredEvent[] {
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter.runId) {
+      clauses.push("run_id = ?");
+      params.push(filter.runId);
+    }
+    if (filter.afterId) {
+      clauses.push("id > ?");
+      params.push(filter.afterId);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    params.push(filter.limit ?? 500);
+    const rows = db
+      .prepare(`SELECT * FROM events ${where} ORDER BY id ASC LIMIT ?`)
+      .all(...params) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: Number(row.id),
+      runId: (row.run_id as string | null) ?? undefined,
+      type: String(row.type),
+      payload: parse<Record<string, unknown>>(row.payload, {}),
+      createdAt: String(row.created_at),
+    }));
+  },
+
+  maxEventId(): number {
+    const row = db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM events").get() as { id: number };
+    return Number(row.id);
   },
 };
 

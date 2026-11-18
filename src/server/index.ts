@@ -1,15 +1,16 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import Fastify from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { config } from "../config/index.js";
 import { reauditFinding, runAudit } from "../pipeline/index.js";
 import { applyApproved, rollbackRun } from "../patches/index.js";
 import { events } from "../shared/events.js";
 import { newId, store } from "../storage/index.js";
-import type { AuditOptions, Domain, TargetType } from "../shared/types.js";
+import type { AuditOptions, Domain, Job, TargetType } from "../shared/types.js";
 import { logger } from "../observability/index.js";
 import { snapshot } from "../observability/metrics.js";
+import { startWorker, stopWorker } from "./worker.js";
 
 const dashboardDir = resolve(process.cwd(), "dashboard/dist");
 
@@ -24,13 +25,25 @@ code{background:#161b22;padding:2px 6px;border-radius:4px;color:#79c0ff}a{color:
 <p>Endpoints: <code>/api/runs</code>, <code>/api/findings</code>, <code>/api/events</code></p>
 </body></html>`;
 
-export async function startServer(port = config.PORT): Promise<void> {
+export async function startServer(port = config.PORT): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
 
-  app.addHook("onRequest", async (_request, reply) => {
+  const publicRoutes = new Set(["/api/health", "/api/config"]);
+  app.addHook("onRequest", async (request, reply) => {
     reply.header("Access-Control-Allow-Origin", "*");
     reply.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    reply.header("Access-Control-Allow-Headers", "Content-Type");
+    reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+    const path = request.url.split("?")[0];
+    if (!config.API_TOKEN || !path.startsWith("/api/") || publicRoutes.has(path)) return;
+    const query = request.query as { token?: string } | undefined;
+    const header = request.headers.authorization;
+    const token = header?.startsWith("Bearer ") ? header.slice(7) : query?.token;
+    // Embora CORS seja permissivo, a chamada de estado exige token explícito.
+    if (token !== config.API_TOKEN) {
+      reply.code(401);
+      return reply.send({ error: "Não autorizado. Informe Bearer <API_TOKEN>." });
+    }
   });
   app.options("/*", async (_request, reply) => reply.code(204).send());
 
@@ -40,12 +53,24 @@ export async function startServer(port = config.PORT): Promise<void> {
     model: config.DEEPSEEK_MODEL,
     verifyModel: config.DEEPSEEK_VERIFY_MODEL,
     apiKeyConfigured: config.apiKeyConfigured,
+    authRequired: Boolean(config.API_TOKEN),
     dataDir: config.dataDir,
   }));
 
   app.get("/api/runs", async (request) => {
     const query = request.query as { limit?: string };
     return { runs: store.listRuns(Math.min(Number(query.limit) || 50, 200)) };
+  });
+
+  app.get("/api/jobs", async (request) => {
+    const query = request.query as { limit?: string };
+    return { jobs: store.listJobs(Math.min(Number(query.limit) || 50, 200)) };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/jobs/:id", async (request, reply) => {
+    const job = store.getJob(request.params.id);
+    if (!job) return reply.code(404).send({ error: "Job não encontrado." });
+    return { job };
   });
 
   app.get<{ Params: { id: string } }>("/api/runs/:id", async (request, reply) => {
@@ -107,16 +132,18 @@ export async function startServer(port = config.PORT): Promise<void> {
       allowPrivateHosts: body.allowPrivateHosts,
       allowMutatingRequests: body.allowMutatingRequests,
     };
-    // Execução em background: o progresso chega por /api/events (SSE).
-    setImmediate(() => {
-      void runAudit(body.target as string, options).catch((error: unknown) => {
-        events.emitEvent({
-          type: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
-      });
-    });
-    return reply.code(202).send({ started: true, target: body.target });
+    // Fila durável: o worker processa e o progresso chega por /api/events (SSE).
+    const job: Job = {
+      id: newId("job"),
+      target: body.target,
+      options,
+      status: "queued",
+      attempts: 0,
+      createdAt: new Date().toISOString(),
+    };
+    store.enqueueJob(job);
+    events.emitEvent({ type: "job:queued", jobId: job.id, target: job.target });
+    return reply.code(202).send({ started: true, jobId: job.id, target: body.target });
   });
 
   async function setFindingStatus(
@@ -192,7 +219,8 @@ export async function startServer(port = config.PORT): Promise<void> {
     restored: rollbackRun(request.params.id),
   }));
 
-  app.get("/api/events", (_request, reply) => {
+  app.get("/api/events", (request, reply) => {
+    const query = request.query as { runId?: string; afterId?: string };
     reply.hijack();
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -201,11 +229,14 @@ export async function startServer(port = config.PORT): Promise<void> {
       "X-Accel-Buffering": "no",
     });
     reply.raw.write(": conectado\n\n");
-    const unsubscribe = events.onEvent((event) => {
-      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-    });
+    const unsubscribe = events.onEvent(
+      (event) => {
+        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      },
+      { runId: query.runId, afterId: query.afterId ? Number(query.afterId) : undefined },
+    );
     const heartbeat = setInterval(() => reply.raw.write(": ping\n\n"), 20_000);
-    _request.raw.on("close", () => {
+    request.raw.on("close", () => {
       clearInterval(heartbeat);
       unsubscribe();
     });
@@ -218,7 +249,10 @@ export async function startServer(port = config.PORT): Promise<void> {
     app.get("/", async (_request, reply) => reply.type("text/html").send(FALLBACK_HTML));
   }
 
+  app.addHook("onClose", async () => stopWorker());
+  startWorker();
   await app.listen({ port, host: config.HOST });
   logger.info("server.started", { port, host: config.HOST, dashboard: existsSync(dashboardDir) });
   console.log(`AutoCorrecoes API + dashboard: http://${config.HOST}:${port}`);
+  return app;
 }

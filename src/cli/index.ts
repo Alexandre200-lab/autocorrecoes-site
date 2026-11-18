@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import YAML from "yaml";
 import { Command } from "commander";
 import { config } from "../config/index.js";
 import { getBudget } from "../ai/client.js";
@@ -7,6 +9,7 @@ import { reauditFinding, runAudit } from "../pipeline/index.js";
 import { applyApproved, rollbackRun } from "../patches/index.js";
 import { newId, store } from "../storage/index.js";
 import { toSarif } from "../report/sarif.js";
+import { fingerprint } from "../pipeline/fingerprint.js";
 import type { Domain, Finding, TargetType } from "../shared/types.js";
 
 const program = new Command();
@@ -196,6 +199,58 @@ program
         iniciada: r.startedAt.slice(0, 19),
       })),
     );
+  });
+
+program
+  .command("baseline")
+  .description("Adiciona ao .autocorrecoes.yml as fingerprints dos sinais de uma execução")
+  .argument("<runId>")
+  .option("--file <caminho>", "arquivo de configuração", ".autocorrecoes.yml")
+  .action((runId: string, opts) => {
+    const run = store.getRun(runId);
+    if (!run) {
+      console.error("Execução não encontrada.");
+      process.exitCode = 1;
+      return;
+    }
+    const file = resolve(process.cwd(), opts.file);
+    const existing = (existsSync(file)
+      ? (YAML.parse(readFileSync(file, "utf8")) as Record<string, unknown>)
+      : {}) as {
+      baseline?: { fingerprints?: string[] };
+      [key: string]: unknown;
+    };
+    const current = existing.baseline?.fingerprints ?? [];
+    const merged = [...new Set([...current, ...run.signals.map(fingerprint)])];
+    existing.baseline = { ...(existing.baseline ?? {}), fingerprints: merged };
+    writeFileSync(file, YAML.stringify(existing), "utf8");
+    console.log(`${merged.length - current.length} nova(s) fingerprint(s) em ${file} (total: ${merged.length}).`);
+  });
+
+program
+  .command("jobs")
+  .description("Lista jobs da fila durável (quando o servidor está ativo)")
+  .action(async () => {
+    const base = `http://${process.env.HOST ?? "127.0.0.1"}:${process.env.PORT ?? 4310}`;
+    try {
+      const token = process.env.API_TOKEN;
+      const response = await fetch(`${base}/api/jobs`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      const data = (await response.json()) as {
+        jobs: Array<{ id: string; target: string; status: string; runId?: string }>;
+      };
+      console.table(
+        data.jobs.map((job) => ({
+          id: job.id,
+          alvo: short(job.target, 45),
+          status: job.status,
+          runId: job.runId ?? "-",
+        })),
+      );
+    } catch (error) {
+      console.error(`Não foi possível consultar ${base}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   });
 
 async function setStatus(ids: string[], status: "approved" | "rejected", reason: string): Promise<void> {

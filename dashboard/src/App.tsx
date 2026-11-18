@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Severity = "P1" | "P2" | "P3" | "P4";
 type FindingStatus =
@@ -66,7 +66,9 @@ interface Receipt {
 
 interface PipelineEvent {
   type: string;
+  eventId?: number;
   runId?: string;
+  jobId?: string;
   findingId?: string;
   message?: string;
   domain?: string;
@@ -85,8 +87,13 @@ const STATUS_LABEL: Record<FindingStatus, string> = {
   failed: "Falhou",
 };
 
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem("autocorrecoes_token");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+  const response = await fetch(url, { headers: authHeaders() });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return (await response.json()) as T;
 }
@@ -94,9 +101,10 @@ async function getJson<T>(url: string): Promise<T> {
 async function postJson<T>(url: string, body?: unknown): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return (await response.json()) as T;
 }
 
@@ -116,6 +124,11 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<"all" | FindingStatus>("all");
+  const [token, setToken] = useState(() => localStorage.getItem("autocorrecoes_token") ?? "");
+  const [tokenInput, setTokenInput] = useState("");
+  const [authRequired, setAuthRequired] = useState(false);
+  const lastEventIdRef = useRef(0);
+  const currentJobIdRef = useRef<string | null>(null);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -144,6 +157,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    fetch("/api/config")
+      .then((response) => response.json())
+      .then((data: { authRequired?: boolean }) => setAuthRequired(Boolean(data.authRequired)))
+      .catch(() => undefined);
     void loadRuns();
   }, [loadRuns]);
 
@@ -152,7 +169,12 @@ export default function App() {
   }, [runId, loadRun]);
 
   useEffect(() => {
-    const source = new EventSource("/api/events");
+    const params = new URLSearchParams();
+    if (token) params.set("token", token);
+    if (runId) params.set("runId", runId);
+    if (lastEventIdRef.current) params.set("afterId", String(lastEventIdRef.current));
+    const query = params.toString();
+    const source = new EventSource(`/api/events${query ? `?${query}` : ""}`);
     source.onmessage = (message) => {
       let event: PipelineEvent;
       try {
@@ -160,9 +182,18 @@ export default function App() {
       } catch {
         return;
       }
+      if (event.eventId) {
+        if (event.eventId <= lastEventIdRef.current) return; // dedupe do replay
+        lastEventIdRef.current = event.eventId;
+      }
       setEvents((current) => [...current.slice(-60), `${time(new Date().toISOString())}  ${event.type}`]);
       if (event.type === "error" && event.message) setError(event.message);
       if (event.type === "run:started" || event.type === "run:finished") void loadRuns();
+      if (event.type === "job:finished" && event.jobId === currentJobIdRef.current && event.runId) {
+        setRunId(event.runId);
+        void loadRuns();
+        setBusy(false);
+      }
       if (
         event.runId &&
         event.runId === runId &&
@@ -172,7 +203,7 @@ export default function App() {
       }
     };
     return () => source.close();
-  }, [runId, loadRuns, loadRun]);
+  }, [runId, token, loadRuns, loadRun]);
 
   const startAudit = async () => {
     if (!target.trim()) return;
@@ -180,9 +211,14 @@ export default function App() {
     setError("");
     const previous = runs[0]?.id;
     try {
-      await postJson("/api/audit", { target: target.trim() });
-      for (let attempt = 0; attempt < 12; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+      const response = await postJson<{ jobId: string }>("/api/audit", { target: target.trim() });
+      currentJobIdRef.current = response.jobId;
+      setEvents((current) => [
+        ...current,
+        `${time(new Date().toISOString())}  job:queued ${response.jobId}`,
+      ]);
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
         const data = await getJson<{ runs: Run[] }>("/api/runs");
         setRuns(data.runs);
         const newest = data.runs[0];
@@ -244,6 +280,36 @@ export default function App() {
         </div>
         <span className="pill">v1.0</span>
       </header>
+
+      {authRequired && !token && (
+        <section className="panel login">
+          <h2>Acesso ao painel</h2>
+          <p className="muted">Esta instância exige o token definido em API_TOKEN.</p>
+          <input
+            type="password"
+            value={tokenInput}
+            onChange={(e) => setTokenInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" || !tokenInput.trim()) return;
+              localStorage.setItem("autocorrecoes_token", tokenInput.trim());
+              setToken(tokenInput.trim());
+              setError("");
+            }}
+            placeholder="API_TOKEN"
+            aria-label="Token de acesso"
+          />
+          <button
+            onClick={() => {
+              if (!tokenInput.trim()) return;
+              localStorage.setItem("autocorrecoes_token", tokenInput.trim());
+              setToken(tokenInput.trim());
+              setError("");
+            }}
+          >
+            Entrar
+          </button>
+        </section>
+      )}
 
       <section className="new-audit panel">
         <input

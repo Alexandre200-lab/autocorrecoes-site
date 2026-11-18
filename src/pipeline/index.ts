@@ -1,4 +1,5 @@
 import { config } from "../config/index.js";
+import { applySeverityOverride, isIgnored, loadProjectConfig, ruleAction } from "../config/project.js";
 import { propose } from "../ai/proposer.js";
 import { verify } from "../ai/verifier.js";
 import { getBudget, resetBudget } from "../ai/client.js";
@@ -21,6 +22,8 @@ import type {
   TargetType,
 } from "../shared/types.js";
 import { dedupeSignals } from "./dedup.js";
+import { fingerprint, splitByBaseline } from "./fingerprint.js";
+import { resolveLocalTarget } from "../auditors/url.js";
 
 function detectTargetType(target: string): TargetType {
   if (/^https?:\/\//i.test(target) || /^[\w-]+(\.[\w-]+)+(:\d+)?(\/|$)/.test(target)) return "url";
@@ -81,6 +84,17 @@ export async function runAudit(
   provider?: AiProvider,
 ): Promise<AuditOutcome> {
   const type = options.type ?? detectTargetType(target);
+  let project = options.project;
+  if (!project) {
+    try {
+      project = loadProjectConfig(type === "path" ? resolveLocalTarget(target) : process.cwd());
+    } catch (error) {
+      logger.warn("project.config.invalid", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  const auditOptions: AuditOptions = { ...options, project };
   const startedAtMs = performance.now();
   const id = newId("run");
   const traceId = newTraceId();
@@ -99,12 +113,31 @@ export async function runAudit(
   logger.info("pipeline.started", { runId: id, target, type, traceId });
 
   try {
-    const collected = await collect(target, type, options.domains, { runId: id, traceId }, id, options);
-    run.signals = collected.signals;
+    const collected = await collect(
+      target,
+      type,
+      options.domains ?? project?.domains,
+      { runId: id, traceId },
+      id,
+      auditOptions,
+    );
+
+    const filtered = collected.signals.filter(
+      (signal) =>
+        !isIgnored(signal.path ?? signal.url ?? "", project?.ignore ?? []) &&
+        (!project || ruleAction(project, signal.ruleId) !== "off"),
+    );
+    const withOverrides = filtered.map((signal) => ({
+      ...signal,
+      severity: project ? applySeverityOverride(signal.severity, signal.ruleId, project) : signal.severity,
+    }));
+    const baseline = splitByBaseline(withOverrides, project?.baseline.fingerprints ?? []);
+
+    run.signals = baseline.kept;
     run.checksRun = collected.checksRun;
     run.checksNotRun = collected.checksNotRun;
-    for (const signal of collected.signals) store.insertSignal(id, signal);
-    events.emitEvent({ type: "audit:finished", runId: id, signals: collected.signals.length });
+    for (const signal of baseline.kept) store.insertSignal(id, signal);
+    events.emitEvent({ type: "audit:finished", runId: id, signals: baseline.kept.length });
     store.updateRun(id, {
       status: "completed",
       checksRun: collected.checksRun,
@@ -119,7 +152,10 @@ export async function runAudit(
         target,
         type,
         traceId,
-        signalCount: collected.signals.length,
+        signalCount: baseline.kept.length,
+        ignored: collected.signals.length - filtered.length,
+        baselineSuppressed: baseline.suppressed.map((s) => fingerprint(s)),
+        configFile: Boolean(project),
         checksRun: collected.checksRun,
         checksNotRun: collected.checksNotRun,
         note: "Limite da auditoria automática: ferramentas detectam apenas parte dos critérios WCAG; revisão humana continua necessária.",

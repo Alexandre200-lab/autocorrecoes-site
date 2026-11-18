@@ -9,6 +9,8 @@ const boolString = z
 
 const EnvSchema = z.object({
   DEEPSEEK_API_KEY: z.string().trim().optional(),
+  /** Token de acesso à API/dashboard. Vazio = modo desenvolvimento sem auth. */
+  API_TOKEN: z.string().trim().optional(),
   DEEPSEEK_BASE_URL: z.string().url().default("https://api.deepseek.com"),
   DEEPSEEK_MODEL: z.string().min(1).default("deepseek-flash"),
   DEEPSEEK_VERIFY_MODEL: z.string().min(1).default("deepseek-flash"),

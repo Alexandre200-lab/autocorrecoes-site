@@ -19,13 +19,17 @@ interface Probe {
   bodySnippet: string;
 }
 
-async function probe(url: string, method = "GET"): Promise<Probe> {
+async function probe(
+  url: string,
+  method = "GET",
+  extraHeaders: Record<string, string> = {},
+): Promise<Probe> {
   const started = performance.now();
   const response = await fetch(url, {
     method,
     redirect: "follow",
     signal: AbortSignal.timeout(Math.min(config.AUDIT_TIMEOUT_MS, 20_000)),
-    headers: { "User-Agent": "AutoCorrecoes/1.0 (auditoria)" },
+    headers: { "User-Agent": "AutoCorrecoes/1.0 (auditoria)", ...extraHeaders },
   });
   const text = await response.text();
   return {
@@ -62,10 +66,12 @@ export class BackendAuditor implements Auditor {
       return { signals, checksRun, checksNotRun, context: message };
     }
     const isHttps = url.startsWith("https://");
+    const customHeaders = options.project?.headers ?? {};
+    if (Object.keys(customHeaders).length) checksRun.push("headers customizados do projeto");
 
     let main: Probe;
     try {
-      main = await probe(url);
+      main = await probe(url, "GET", customHeaders);
       checksRun.push("HTTP GET (página principal)");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -169,7 +175,7 @@ export class BackendAuditor implements Auditor {
     const samples = [main.latencyMs];
     for (let i = 0; i < 4; i += 1) {
       try {
-        samples.push((await probe(url)).latencyMs);
+        samples.push((await probe(url, "GET", customHeaders)).latencyMs);
       } catch {
         // amostra descartada
       }
@@ -191,7 +197,11 @@ export class BackendAuditor implements Auditor {
 
     if (options.allowMutatingRequests) {
       try {
-        const optionsResponse = await fetch(url, { method: "OPTIONS", signal: AbortSignal.timeout(10_000) });
+        const optionsResponse = await fetch(url, {
+          method: "OPTIONS",
+          headers: customHeaders,
+          signal: AbortSignal.timeout(10_000),
+        });
         checksRun.push("HTTP OPTIONS");
         const allow = optionsResponse.headers.get("allow") ?? "";
         if (/\b(PUT|DELETE|PATCH)\b/i.test(allow)) {

@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { config, viewport } from "../../config/index.js";
+import { resolveStorageState } from "../../config/project.js";
 import { assertPublicUrl } from "../../security/network.js";
 import { redactSecrets } from "../../security/redact.js";
 import type { AuditOptions, RawSignal } from "../../shared/types.js";
@@ -91,12 +92,18 @@ export class DesignAuditor implements Auditor {
 
       for (const vp of viewports) {
         // axe-core/playwright exige página criada via browser.newContext().
+        const storageState = resolveStorageState(options.project ?? { auth: {} }, process.cwd());
         const browserContext = await browser.newContext({
           viewport: { width: vp.width, height: vp.height },
+          ...(storageState ? { storageState } : {}),
+          ...(options.project?.headers ? { extraHTTPHeaders: options.project.headers } : {}),
         });
         const page = await browserContext.newPage();
         try {
-          await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+          await page.goto(url, {
+            waitUntil: "domcontentloaded",
+            timeout: options.project?.timeoutMs ?? 30_000,
+          });
           await page.waitForTimeout(700);
 
           const screenshot = join(screenshotDir, `${vp.name}.png`);
