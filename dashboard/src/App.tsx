@@ -64,6 +64,14 @@ interface Receipt {
   payload: Record<string, unknown>;
 }
 
+interface Trend {
+  id: string;
+  startedAt: string;
+  target: string;
+  signals: number;
+  bySeverity: Record<string, number>;
+}
+
 interface PipelineEvent {
   type: string;
   eventId?: number;
@@ -87,13 +95,8 @@ const STATUS_LABEL: Record<FindingStatus, string> = {
   failed: "Falhou",
 };
 
-function authHeaders(): Record<string, string> {
-  const token = localStorage.getItem("autocorrecoes_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { headers: authHeaders() });
+  const response = await fetch(url, { credentials: "include" });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return (await response.json()) as T;
 }
@@ -101,7 +104,8 @@ async function getJson<T>(url: string): Promise<T> {
 async function postJson<T>(url: string, body?: unknown): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -114,6 +118,7 @@ function time(value: string): string {
 
 export default function App() {
   const [runs, setRuns] = useState<Run[]>([]);
+  const [trends, setTrends] = useState<Trend[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
@@ -124,7 +129,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<"all" | FindingStatus>("all");
-  const [token, setToken] = useState(() => localStorage.getItem("autocorrecoes_token") ?? "");
+  const [authenticated, setAuthenticated] = useState(true);
   const [tokenInput, setTokenInput] = useState("");
   const [authRequired, setAuthRequired] = useState(false);
   const lastEventIdRef = useRef(0);
@@ -135,8 +140,12 @@ export default function App() {
       const data = await getJson<{ runs: Run[] }>("/api/runs");
       setRuns(data.runs);
       setRunId((current) => current ?? data.runs[0]?.id ?? null);
+      const trendData = await getJson<{ trends: Trend[] }>("/api/trends");
+      setTrends(trendData.trends);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      if (message.includes("401")) setAuthenticated(false);
+      setError(message);
     }
   }, []);
 
@@ -169,41 +178,63 @@ export default function App() {
   }, [runId, loadRun]);
 
   useEffect(() => {
-    const params = new URLSearchParams();
-    if (token) params.set("token", token);
-    if (runId) params.set("runId", runId);
-    if (lastEventIdRef.current) params.set("afterId", String(lastEventIdRef.current));
-    const query = params.toString();
-    const source = new EventSource(`/api/events${query ? `?${query}` : ""}`);
-    source.onmessage = (message) => {
-      let event: PipelineEvent;
-      try {
-        event = JSON.parse(message.data) as PipelineEvent;
-      } catch {
-        return;
+    let source: EventSource | null = null;
+    let closed = false;
+
+    const connect = async () => {
+      const params = new URLSearchParams();
+      if (authRequired) {
+        try {
+          const { ticket } = await postJson<{ ticket: string }>("/api/events/ticket");
+          params.set("ticket", ticket);
+        } catch {
+          return;
+        }
       }
-      if (event.eventId) {
-        if (event.eventId <= lastEventIdRef.current) return; // dedupe do replay
-        lastEventIdRef.current = event.eventId;
-      }
-      setEvents((current) => [...current.slice(-60), `${time(new Date().toISOString())}  ${event.type}`]);
-      if (event.type === "error" && event.message) setError(event.message);
-      if (event.type === "run:started" || event.type === "run:finished") void loadRuns();
-      if (event.type === "job:finished" && event.jobId === currentJobIdRef.current && event.runId) {
-        setRunId(event.runId);
-        void loadRuns();
-        setBusy(false);
-      }
-      if (
-        event.runId &&
-        event.runId === runId &&
-        ["finding:created", "finding:updated", "audit:finished", "run:finished"].includes(event.type)
-      ) {
-        void loadRun(event.runId);
-      }
+      if (closed) return;
+      if (runId) params.set("runId", runId);
+      if (lastEventIdRef.current) params.set("afterId", String(lastEventIdRef.current));
+      const query = params.toString();
+      source = new EventSource(`/api/events${query ? `?${query}` : ""}`);
+      source.onmessage = (message) => {
+        let event: PipelineEvent;
+        try {
+          event = JSON.parse(message.data) as PipelineEvent;
+        } catch {
+          return;
+        }
+        if (event.eventId) {
+          if (event.eventId <= lastEventIdRef.current) return; // dedupe do replay
+          lastEventIdRef.current = event.eventId;
+        }
+        setEvents((current) => [
+          ...current.slice(-60),
+          `${time(new Date().toISOString())}  ${event.type}`,
+        ]);
+        if (event.type === "error" && event.message) setError(event.message);
+        if (event.type === "run:started" || event.type === "run:finished") void loadRuns();
+        if (event.type === "job:finished" && event.jobId === currentJobIdRef.current && event.runId) {
+          setRunId(event.runId);
+          void loadRuns();
+          setBusy(false);
+        }
+        if (
+          event.runId &&
+          event.runId === runId &&
+          ["finding:created", "finding:updated", "audit:finished", "run:finished"].includes(
+            event.type,
+          )
+        ) {
+          void loadRun(event.runId);
+        }
+      };
     };
-    return () => source.close();
-  }, [runId, token, loadRuns, loadRun]);
+    void connect();
+    return () => {
+      closed = true;
+      source?.close();
+    };
+  }, [runId, authRequired, loadRuns, loadRun]);
 
   const startAudit = async () => {
     if (!target.trim()) return;
@@ -231,6 +262,32 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const addToBaseline = async () => {
+    if (!runId) return;
+    try {
+      const result = await postJson<{ file: string; total: number }>("/api/baseline", { runId });
+      setEvents((current) => [
+        ...current,
+        `${time(new Date().toISOString())}  baseline: ${result.total} fingerprints em ${result.file}`,
+      ]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const login = async () => {
+    if (!tokenInput.trim()) return;
+    try {
+      await postJson("/api/auth/login", { token: tokenInput.trim() });
+      setAuthenticated(true);
+      setTokenInput("");
+      setError("");
+      void loadRuns();
+    } catch {
+      setError("Token inválido.");
     }
   };
 
@@ -281,33 +338,21 @@ export default function App() {
         <span className="pill">v1.0</span>
       </header>
 
-      {authRequired && !token && (
+      {authRequired && !authenticated && (
         <section className="panel login">
           <h2>Acesso ao painel</h2>
-          <p className="muted">Esta instância exige o token definido em API_TOKEN.</p>
+          <p className="muted">Informe o API_TOKEN. A sessão fica em um cookie httpOnly.</p>
           <input
             type="password"
             value={tokenInput}
             onChange={(e) => setTokenInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key !== "Enter" || !tokenInput.trim()) return;
-              localStorage.setItem("autocorrecoes_token", tokenInput.trim());
-              setToken(tokenInput.trim());
-              setError("");
+              if (e.key === "Enter") void login();
             }}
             placeholder="API_TOKEN"
             aria-label="Token de acesso"
           />
-          <button
-            onClick={() => {
-              if (!tokenInput.trim()) return;
-              localStorage.setItem("autocorrecoes_token", tokenInput.trim());
-              setToken(tokenInput.trim());
-              setError("");
-            }}
-          >
-            Entrar
-          </button>
+          <button onClick={() => void login()}>Entrar</button>
         </section>
       )}
 
@@ -343,6 +388,29 @@ export default function App() {
               </button>
             ))}
             {!runs.length && <p className="muted">Nenhuma auditoria ainda.</p>}
+          </div>
+
+          <h2 className="mt">Tendência</h2>
+          <div className="trend">
+            {trends.slice(-12).map((item) => {
+              const total = item.bySeverity.P1 + item.bySeverity.P2 + item.bySeverity.P3 + item.bySeverity.P4;
+              return (
+                <div key={item.id} className="trend-row" title={`${item.id} · ${item.signals} sinais`}>
+                  <small>{time(item.startedAt).slice(5, 16)}</small>
+                  <div className="trend-bars">
+                    {(["P1", "P2", "P3", "P4"] as const).map((severity) => (
+                      <span
+                        key={severity}
+                        className={`trend-bar sev-${severity}`}
+                        style={{ width: `${total ? (item.bySeverity[severity] / total) * 100 : 0}%` }}
+                      />
+                    ))}
+                  </div>
+                  <small>{total}</small>
+                </div>
+              );
+            })}
+            {!trends.length && <p className="muted">Sem dados históricos.</p>}
           </div>
         </aside>
 
@@ -472,6 +540,9 @@ export default function App() {
               <p><small>{run.id}</small></p>
               <p>Sinais: {run.signals.length}</p>
               <p>Checks não executados: {run.checksNotRun.join(", ") || "nenhum"}</p>
+              <button className="mt" onClick={() => void addToBaseline()}>
+                Adicionar ao baseline
+              </button>
               {run.error && <p className="error">{run.error}</p>}
             </div>
           )}

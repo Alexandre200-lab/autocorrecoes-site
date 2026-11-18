@@ -1,13 +1,15 @@
 /**
  * Detecta "correções" que apenas escondem o sintoma — fraude comum de agentes de IA.
- * Um patch que aciona uma destas regras é rejeitado antes de chegar ao humano.
+ * Combina regras léxicas com análise semântica (CSS via PostCSS, JS/TS via Babel AST).
  */
+
+import { detectSuppressionAst } from "../security/suppressionAst.js";
 const SUPPRESSION_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /\baria-hidden\b/i, reason: "aria-hidden esconde o elemento de tecnologias assistivas" },
   { re: /\bdisplay\s*:\s*none\b/i, reason: "display:none esconde o elemento" },
   { re: /\bvisibility\s*:\s*hidden\b/i, reason: "visibility:hidden esconde o elemento" },
   { re: /\bvisibility\s*:\s*collapse\b/i, reason: "visibility:collapse esconde o elemento" },
-  { re: /\bopacity\s*:\s*0(?:\.0+)?\b/i, reason: "opacity:0 esconde o elemento visualmente" },
+  { re: /\bopacity\s*:\s*0(?:\.0+)?(?![\d.])/i, reason: "opacity:0 esconde o elemento visualmente" },
   { re: /\bpointer-events\s*:\s*none\b/i, reason: "pointer-events:none desativa a interação" },
   { re: /\binert\b/i, reason: "inert remove o elemento da árvore de acessibilidade" },
   { re: /\bdisableRules\b/i, reason: "disableRules desliga a regra do axe" },
@@ -19,16 +21,17 @@ const SUPPRESSION_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /rerun\s+on\s*:/i, reason: "mudança de política de CI suspeita" },
 ];
 
-export function isSuppression(text: string): string[] {
+export function isSuppression(text: string, format?: string): string[] {
   const reasons: string[] = [];
   for (const { re, reason } of SUPPRESSION_PATTERNS) {
     if (re.test(text)) reasons.push(reason);
   }
-  return reasons;
+  reasons.push(...detectSuppressionAst(text, format));
+  return [...new Set(reasons)];
 }
 
-export function assertNoSuppression(text: string): void {
-  const reasons = isSuppression(text);
+export function assertNoSuppression(text: string, format?: string): void {
+  const reasons = isSuppression(text, format);
   if (reasons.length > 0) {
     throw new Error(`Patch supressivo rejeitado: ${reasons.join("; ")}`);
   }

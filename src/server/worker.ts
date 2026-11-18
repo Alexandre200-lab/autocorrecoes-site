@@ -1,6 +1,7 @@
 import { logger } from "../observability/index.js";
 import { runAudit } from "../pipeline/index.js";
 import { events } from "../shared/events.js";
+import { notifyNewCritical } from "./notify.js";
 import { store } from "../storage/index.js";
 import type { Job } from "../shared/types.js";
 
@@ -15,6 +16,7 @@ async function execute(job: Job): Promise<void> {
   events.emitEvent({ type: "job:started", jobId: job.id });
   try {
     const outcome = await runAudit(job.target, job.options);
+    await notifyNewCritical(outcome.run);
     store.updateJob(job.id, { status: "done", runId: outcome.run.id });
     events.emitEvent({ type: "job:finished", jobId: job.id, runId: outcome.run.id });
   } catch (error) {

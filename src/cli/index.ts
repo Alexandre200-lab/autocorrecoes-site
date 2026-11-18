@@ -10,6 +10,7 @@ import { applyApproved, rollbackRun } from "../patches/index.js";
 import { newId, store } from "../storage/index.js";
 import { toSarif } from "../report/sarif.js";
 import { fingerprint } from "../pipeline/fingerprint.js";
+import { diffRuns } from "../pipeline/diff.js";
 import { startOtel } from "../observability/otel.js";
 import type { Domain, Finding, TargetType } from "../shared/types.js";
 
@@ -200,6 +201,22 @@ program
         iniciada: r.startedAt.slice(0, 19),
       })),
     );
+  });
+
+program
+  .command("diff")
+  .description("Compara uma execução com a anterior (ou com outra informada)")
+  .argument("<runId>")
+  .argument("[againstId]", "execução base")
+  .action(async (runId: string, againstId?: string) => {
+    const run = store.getRun(runId);
+    if (!run) return console.error("Execução não encontrada.");
+    const previous = againstId ? store.getRun(againstId) : store.previousRun(run);
+    const diff = diffRuns(previous, run);
+    console.log(`Execução ${diff.currentId} vs ${diff.previousId ?? "(nenhuma)"}`);
+    console.log(`Introduzidos: ${diff.introduced.length} | Corrigidos: ${diff.fixed.length} | Persistentes: ${diff.persisting.length}`);
+    for (const signal of diff.introduced) console.log(`  + ${signal.severity} ${signal.ruleId} ${signal.path ?? signal.url ?? ""}`);
+    for (const signal of diff.fixed) console.log(`  - ${signal.severity} ${signal.ruleId} ${signal.path ?? signal.url ?? ""}`);
   });
 
 program

@@ -148,6 +148,7 @@ export async function propose(
         if (proposal.domain !== domain) continue;
         const reasons = isSuppression(
           `${proposal.suggestedFix}\n${proposal.patch?.content ?? ""}\n${proposal.patch?.riskNotes.join("\n") ?? ""}`,
+          proposal.patch?.format,
         );
         if (reasons.length > 0) {
           logger.warn("ai.proposer.suppression_blocked", { runId: run.id, reasons });

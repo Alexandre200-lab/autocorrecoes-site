@@ -14,6 +14,28 @@ test("nãoFLAG código legítimo", () => {
   assert.deepEqual(isSuppression("const visible = !hidden;"), []);
 });
 
+test("AST detecta supressão em CSS e JS/TS", () => {
+  assert.ok(
+    isSuppression(".erro { display: none !important; }", "css-rule").some((r) => r.includes("AST")),
+  );
+  assert.ok(
+    isSuppression("opacity: 0; pointer-events: none;", "css-rule").some((r) => r.includes("AST")),
+  );
+  assert.ok(
+    isSuppression("button.setAttribute('aria-hidden', 'true');", "full-file").some((r) =>
+      r.includes("AST"),
+    ),
+  );
+  assert.ok(
+    isSuppression("element.hidden = true;", "full-file").some((r) => r.includes("AST")),
+  );
+});
+
+test("valores legítimos não são confundidos com supressão", () => {
+  assert.deepEqual(isSuppression(".erro { opacity: 0.001; }", "css-rule"), []);
+  assert.deepEqual(isSuppression("button.setAttribute('aria-label', 'Fechar');", "full-file"), []);
+});
+
 test("lança erro ao encontrar supressão", () => {
   assert.throws(() => assertNoSuppression("display:none"), /supressivo/i);
 });

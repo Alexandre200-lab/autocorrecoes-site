@@ -139,6 +139,27 @@ trabalho, quando o alvo for uma URL). O arquivo permite:
 npm run cli -- baseline <runId>
 ```
 
+## Monitoramento contínuo e evolução
+
+- **Agendamento:** em `.autocorrecoes.yml`:
+  ```yaml
+  schedule:
+    enabled: true
+    everyMinutes: 60
+  ```
+  O servidor agenda auditorias para cada alvo já auditado e registra jobs na fila durável.
+- **Diff entre execuções:** `GET /api/runs/:id/diff?against=<id>` (ou sem `against`, comparando
+  com a execução anterior do mesmo alvo) separa sinais **introduzidos**, **corrigidos** e
+  **persistentes** por fingerprint.
+- **Webhook de P1 novo:** defina `WEBHOOK_URL` (e opcionalmente `WEBHOOK_SECRET` para HMAC
+  `X-AutoCorrecoes-Signature`). O payload só é enviado quando aparece um P1 que não existia
+  na execução anterior.
+- **Baseline pelo dashboard:** o botão "Adicionar ao baseline" mescla as fingerprints da
+  execução no `.autocorrecoes.yml`.
+- **Consenso P1:** `DEEPSEEK_CONSENSUS_P1=true` faz uma segunda verificação independente com
+  `deepseek-v4-pro` antes de aceitar um achado crítico (custo extra).
+- **Tendências:** o painel lateral mostra a distribuição de severidades por execução.
+
 ## Armazenamento e audit trail
 
 SQLite nativo em `data/autocorrecoes.db` (WAL). Tabelas: `runs`, `signals`, `findings`, `receipts`.
@@ -156,7 +177,7 @@ Backups ficam em `data/backups/<runId>/<findingId>/`. Patches para alvos remotos
 - **Proteção SSRF**: hosts loopback/privados/link-local são bloqueados por padrão (`src/security/network.ts`). Cada **redirect é revalidado** e o IP resolvido é **fixado na conexão** (anti DNS-rebinding), tanto no auditor HTTP quanto nas navegações do Playwright. Use `--allow-private-hosts` apenas em testes locais.
 - `safeResolve` usa `realpath` para impedir escape por **symlink**.
 - Conteúdo de código/HTML/diff tratado como **dado não confiável** e delimitado antes do prompt.
-- Anti-supressão cobre `aria-hidden`, `display:none`, `visibility`, `opacity:0`, `pointer-events`, `inert`, `disableRules`, `eslint-disable`, `@ts-*` e desligamento de testes/CI.
+- Anti-supressão combina regras léxicas com **análise semântica** (PostCSS para CSS, Babel AST para JS/TS): detecta `aria-hidden`, `display:none`, `visibility`, `opacity:0`, `pointer-events`, `inert`, `disableRules`, `eslint-disable`, `@ts-*` e desligamento de testes/CI, inclusive em valores calculados.
 - **Migrações versionadas** (`src/storage/migrations.ts`) e escritas transacionais para status + receipts.
 - Verifier não recebe raciocínio do Proposer (evita auto-confirmação).
 - Anti-supressão bloqueia patches fraudulentos.
@@ -186,10 +207,16 @@ Backups ficam em `data/backups/<runId>/<findingId>/`. Patches para alvos remotos
 
 ### Produção
 
-Defina `API_TOKEN` no `.env`. Todas as rotas `/api/*` (exceto `/api/health` e `/api/config`)
-passam a exigir `Authorization: Bearer <token>`. No dashboard, um campo de acesso aparece e o
-token fica no `localStorage`. Para SSE, o token pode ser passado como `?token=` (EventSource
-não permite custom headers).
+Defina `API_TOKEN` no `.env`. Todas as rotas `/api/*` (exceto saúde/config/login/ticket)
+exigem autenticação:
+
+- **Dashboard:** `POST /api/auth/login` define um cookie **httpOnly + SameSite=Strict**
+  (Secure automaticamente atrás de HTTPS). O token nunca fica no `localStorage`.
+- **CLI/CI:** `Authorization: Bearer <token>` continua suportado.
+- **SSE:** `POST /api/events/ticket` emite um **ticket de 5 minutos**; o `EventSource` usa
+  `?ticket=`, sem expor a credencial de sessão na URL.
+
+O rate limit é contabilizado por identidade (sessão/token) com fallback para IP.
 
 - **Documentação interativa:** `http://127.0.0.1:4310/docs` (OpenAPI gerado dos schemas Fastify).
 - **Fila com retry:** até 3 tentativas com backoff exponencial; após isso o job vai para a **dead-letter**. Reabra com `npm run cli -- retry <jobId>` (ou `POST /api/jobs/:id/retry`).

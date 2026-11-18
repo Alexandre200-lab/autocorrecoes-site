@@ -12,6 +12,7 @@ import type {
   Receipt,
   RunStatus,
   StoredEvent,
+  TargetType,
 } from "../shared/types.js";
 
 mkdirSync(config.dataDir, { recursive: true });
@@ -516,6 +517,33 @@ export const store = {
   maxEventId(): number {
     const row = db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM events").get() as { id: number };
     return Number(row.id);
+  },
+
+  // ---- Agendamento e comparação ------------------------------------------
+
+  listDistinctTargets(limit = 100): Array<{ target: string; targetType: TargetType }> {
+    const rows = db
+      .prepare(
+        "SELECT target, target_type FROM runs GROUP BY target, target_type ORDER BY MAX(started_at) DESC LIMIT ?",
+      )
+      .all(limit) as Array<{ target: string; target_type: string }>;
+    return rows.map((row) => ({ target: row.target, targetType: row.target_type as TargetType }));
+  },
+
+  hasRecentJob(target: string, sinceIso: string): boolean {
+    const row = db
+      .prepare("SELECT 1 FROM jobs WHERE target = ? AND created_at >= ? LIMIT 1")
+      .get(target, sinceIso);
+    return Boolean(row);
+  },
+
+  previousRun(run: AuditRun): AuditRun | null {
+    const row = db
+      .prepare(
+        "SELECT * FROM runs WHERE target = ? AND id != ? AND started_at < ? ORDER BY started_at DESC LIMIT 1",
+      )
+      .get(run.target, run.id, run.startedAt) as RunRow | undefined;
+    return row ? toRun(row, this.listSignals(row.id)) : null;
   },
 };
 

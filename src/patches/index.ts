@@ -46,7 +46,7 @@ export function safeResolve(root: string, file: string): string {
 }
 
 export function validatePatch(patch: Patch, root?: string): void {
-  assertNoSuppression(`${patch.content}\n${patch.riskNotes.join("\n")}`);
+  assertNoSuppression(`${patch.content}\n${patch.riskNotes.join("\n")}`, patch.format);
   if (!patch.files.length) throw new Error("Patch sem arquivos de destino.");
   if (root) {
     for (const file of patch.files) safeResolve(root, file);

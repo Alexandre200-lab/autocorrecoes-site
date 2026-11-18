@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
+import fastifyCookie from "@fastify/cookie";
+import { createHash, randomBytes } from "node:crypto";
 import swagger from "@fastify/swagger";
 import swaggerUI from "@fastify/swagger-ui";
 import { config } from "../config/index.js";
@@ -13,6 +15,10 @@ import type { AuditOptions, Domain, Job, TargetType } from "../shared/types.js";
 import { logger } from "../observability/index.js";
 import { snapshot } from "../observability/metrics.js";
 import { startWorker, stopWorker } from "./worker.js";
+import { startScheduler, stopScheduler } from "./scheduler.js";
+import { diffRuns } from "../pipeline/diff.js";
+import { addBaselineFingerprints } from "../config/project.js";
+import { resolveLocalTarget } from "../auditors/url.js";
 
 const dashboardDir = resolve(process.cwd(), "dashboard/dist");
 
@@ -45,9 +51,20 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     },
   });
   await app.register(swaggerUI, { routePrefix: "/docs" });
+  await app.register(fastifyCookie);
 
   const rateHits = new Map<string, { count: number; resetAt: number }>();
-  const publicRoutes = new Set(["/api/health", "/api/config"]);
+  const sseTickets = new Map<string, number>();
+  const SESSION_COOKIE = "autocorrecoes_session";
+  const SESSION_MAX_AGE = 8 * 60 * 60;
+  const SSE_TICKET_TTL = 5 * 60 * 1000;
+  const publicRoutes = new Set([
+    "/api/health",
+    "/api/config",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/events/ticket",
+  ]);
   app.addHook("onRequest", async (request, reply) => {
     reply.header("Access-Control-Allow-Origin", "*");
     reply.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -58,8 +75,16 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     const isApi = path.startsWith("/api/");
     const isPublic = publicRoutes.has(path) || isPublicDocs;
 
+    const cookies = (request as unknown as { cookies?: Record<string, string> }).cookies ?? {};
+    const bearer = request.headers.authorization?.startsWith("Bearer ")
+      ? request.headers.authorization.slice(7)
+      : undefined;
+    const queryAuth = request.query as { token?: string; ticket?: string } | undefined;
+    const identity = cookies[SESSION_COOKIE] ?? bearer ?? queryAuth?.token ?? request.ip;
+    const rateKey = createHash("sha256").update(identity).digest("hex").slice(0, 16);
+
     if (config.RATE_LIMIT_MAX > 0 && isApi && !isPublic) {
-      const key = String(request.headers["x-forwarded-for"] ?? request.ip);
+      const key = rateKey;
       const now = Date.now();
       let entry = rateHits.get(key);
       if (!entry || now > entry.resetAt) {
@@ -76,16 +101,73 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     }
 
     if (!config.API_TOKEN || !isApi || isPublic) return;
-    const query = request.query as { token?: string } | undefined;
-    const header = request.headers.authorization;
-    const token = header?.startsWith("Bearer ") ? header.slice(7) : query?.token;
-    // Embora CORS seja permissivo, a chamada de estado exige token explícito.
-    if (token !== config.API_TOKEN) {
+
+    // SSE usa ticket de curta duração em vez do token de sessão na URL.
+    if (path === "/api/events" && queryAuth?.ticket) {
+      const expires = sseTickets.get(queryAuth.ticket);
+      if (expires && expires > Date.now()) return;
       reply.code(401);
-      return reply.send({ error: "Não autorizado. Informe Bearer <API_TOKEN>." });
+      return reply.send({ error: "Ticket de eventos inválido ou expirado." });
+    }
+
+    // Cookie httpOnly é a forma preferida; Bearer mantém compatibilidade com CLI/CI.
+    if (cookies[SESSION_COOKIE] !== config.API_TOKEN && bearer !== config.API_TOKEN) {
+      reply.code(401);
+      return reply.send({ error: "Não autorizado. Faça login ou informe Bearer <API_TOKEN>." });
     }
   });
   app.options("/*", async (_request, reply) => reply.code(204).send());
+
+  app.post(
+    "/api/auth/login",
+    {
+      schema: {
+        tags: ["system"],
+        body: {
+          type: "object",
+          required: ["token"],
+          properties: { token: { type: "string" } },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { token } = request.body as { token: string };
+      if (!config.API_TOKEN || token !== config.API_TOKEN) {
+        return reply.code(401).send({ error: "Token inválido." });
+      }
+      const secure =
+        request.headers["x-forwarded-proto"] === "https" || request.protocol === "https";
+      reply.setCookie(SESSION_COOKIE, config.API_TOKEN, {
+        httpOnly: true,
+        sameSite: "strict",
+        secure,
+        path: "/",
+        maxAge: SESSION_MAX_AGE,
+      });
+      return { ok: true };
+    },
+  );
+
+  app.post("/api/auth/logout", async (_request, reply) => {
+    reply.clearCookie(SESSION_COOKIE, { path: "/" });
+    return { ok: true };
+  });
+
+  app.post("/api/events/ticket", async (request, reply) => {
+    const cookies = (request as unknown as { cookies?: Record<string, string> }).cookies ?? {};
+    const bearer = request.headers.authorization?.startsWith("Bearer ")
+      ? request.headers.authorization.slice(7)
+      : undefined;
+    if (config.API_TOKEN && cookies[SESSION_COOKIE] !== config.API_TOKEN && bearer !== config.API_TOKEN) {
+      return reply.code(401).send({ error: "Não autorizado." });
+    }
+    for (const [key, expires] of sseTickets) {
+      if (expires < Date.now()) sseTickets.delete(key);
+    }
+    const ticket = randomBytes(24).toString("base64url");
+    sseTickets.set(ticket, Date.now() + SSE_TICKET_TTL);
+    return { ticket, expiresIn: Math.round(SSE_TICKET_TTL / 1000) };
+  });
 
   app.get("/api/health", async () => ({ ok: true, version: "1.0.0" }));
   app.get("/api/metrics", async () => snapshot());
@@ -133,6 +215,58 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
       findings: store.listFindings({ runId: run.id }),
       receipts: store.listReceipts(run.id),
     };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/runs/:id/diff", async (request, reply) => {
+    const run = store.getRun(request.params.id);
+    if (!run) return reply.code(404).send({ error: "Execução não encontrada." });
+    const query = request.query as { against?: string };
+    const previous = query.against
+      ? store.getRun(query.against)
+      : store.previousRun(run);
+    return diffRuns(previous, run);
+  });
+
+  app.get("/api/trends", async (request) => {
+    const query = request.query as { limit?: string };
+    const runs = store
+      .listRuns(Math.min(Number(query.limit) || 20, 100))
+      .slice()
+      .reverse();
+    return {
+      trends: runs.map((run) => {
+        const findings = store.listFindings({ runId: run.id, limit: 500 });
+        const bySeverity = { P1: 0, P2: 0, P3: 0, P4: 0 };
+        for (const finding of findings) bySeverity[finding.severity] += 1;
+        return {
+          id: run.id,
+          startedAt: run.startedAt,
+          target: run.target,
+          signals: run.signals.length,
+          bySeverity,
+        };
+      }),
+    };
+  });
+
+  app.post("/api/baseline", {
+    schema: {
+      tags: ["findings"],
+      body: {
+        type: "object",
+        required: ["runId"],
+        properties: {
+          runId: { type: "string" },
+          fingerprints: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const body = request.body as { runId: string; fingerprints?: string[] };
+    const run = store.getRun(body.runId);
+    if (!run) return reply.code(404).send({ error: "Execução não encontrada." });
+    const root = run.targetType === "path" ? resolveLocalTarget(run.target) : process.cwd();
+    return addBaselineFingerprints(root, body.fingerprints ?? []);
   });
 
   app.get("/api/findings", async (request) => {
@@ -319,8 +453,12 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     app.get("/", async (_request, reply) => reply.type("text/html").send(FALLBACK_HTML));
   }
 
-  app.addHook("onClose", async () => stopWorker());
+  app.addHook("onClose", async () => {
+    stopWorker();
+    stopScheduler();
+  });
   startWorker();
+  startScheduler();
   await app.listen({ port, host: config.HOST });
   logger.info("server.started", { port, host: config.HOST, dashboard: existsSync(dashboardDir) });
   console.log(`AutoCorrecoes API + dashboard: http://${config.HOST}:${port}`);

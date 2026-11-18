@@ -88,6 +88,15 @@ button.approve { background: #1f6feb; border-color: #388bfd; }
 .run-item small { color: #8b949e; font-size: 10px; }
 .run-item.active { border-color: #388bfd; background: #132342; }
 
+.trend { display: flex; flex-direction: column; gap: 6px; }
+.trend-row { display: grid; grid-template-columns: 78px 1fr 20px; gap: 6px; align-items: center; }
+.trend-row small { color: #8b949e; font-size: 9px; }
+.trend-bars { display: flex; height: 7px; border-radius: 3px; overflow: hidden; background: #21262d; }
+.trend-bar.sev-P1 { background: #f85149; }
+.trend-bar.sev-P2 { background: #d29922; }
+.trend-bar.sev-P3 { background: #58a6ff; }
+.trend-bar.sev-P4 { background: #8b949e; }
+
 .section-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .section-head h2 { margin: 0; }
 .actions { display: flex; gap: 8px; }

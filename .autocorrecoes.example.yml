@@ -30,3 +30,8 @@ baseline:
   fingerprints: []
 
 timeoutMs: 30000
+
+# Auditorias recorrentes (o servidor precisa estar ativo)
+schedule:
+  enabled: false
+  everyMinutes: 60

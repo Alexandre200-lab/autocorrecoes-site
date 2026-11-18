@@ -22,8 +22,32 @@ test("API exige Bearer token quando API_TOKEN está configurado", async () => {
     const body = (await config.json()) as { authRequired: boolean };
     assert.equal(body.authRequired, true);
 
-    const queryToken = await fetch(`${base}/api/metrics?token=token-de-teste-123456`);
-    assert.equal(queryToken.status, 200);
+    const withBearer = await fetch(`${base}/api/metrics`, {
+      headers: { Authorization: "Bearer token-de-teste-123456" },
+    });
+    assert.equal(withBearer.status, 200);
+
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: "token-de-teste-123456" }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0];
+    assert.match(login.headers.get("set-cookie") ?? "", /HttpOnly/i);
+    const withCookie = await fetch(`${base}/api/runs`, { headers: { Cookie: cookie } });
+    assert.equal(withCookie.status, 200);
+
+    const ticketResponse = await fetch(`${base}/api/events/ticket`, {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+    const { ticket } = (await ticketResponse.json()) as { ticket: string };
+    const sse = await fetch(`${base}/api/events?ticket=${ticket}`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    assert.equal(sse.status, 200);
+    await sse.body?.cancel();
   } finally {
     await app.close();
   }

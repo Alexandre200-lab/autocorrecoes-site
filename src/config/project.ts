@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
@@ -27,6 +27,12 @@ export const ProjectConfigSchema = z.object({
     .default({ fingerprints: [] }),
   maxPages: z.number().int().positive().optional(),
   timeoutMs: z.number().int().positive().optional(),
+  schedule: z
+    .object({
+      enabled: z.boolean().default(false),
+      everyMinutes: z.number().int().positive().default(60),
+    })
+    .default({ enabled: false, everyMinutes: 60 }),
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
@@ -50,6 +56,22 @@ export function loadProjectConfig(root: string): ProjectConfig {
     throw new Error(`Configuração de projeto inválida em ${file}: ${z.prettifyError(parsed.error)}`);
   }
   return parsed.data;
+}
+
+/** Mescla fingerprints no baseline do .autocorrecoes.yml do alvo. */
+export function addBaselineFingerprints(root: string, fingerprints: string[]): {
+  file: string;
+  total: number;
+} {
+  const file = findProjectConfigFile(root) ?? resolve(root, ".autocorrecoes.yml");
+  const existing = existsSync(file)
+    ? (YAML.parse(readFileSync(file, "utf8")) as Record<string, unknown>)
+    : {};
+  const baseline = (existing.baseline ?? {}) as { fingerprints?: string[] };
+  const merged = [...new Set([...(baseline.fingerprints ?? []), ...fingerprints])];
+  existing.baseline = { ...baseline, fingerprints: merged };
+  writeFileSync(file, YAML.stringify(existing), "utf8");
+  return { file, total: merged.length };
 }
 
 export function resolveStorageState(

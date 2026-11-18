@@ -25,6 +25,7 @@ export async function verify(
   finding: Finding,
   run: AuditRun,
   provider: AiProvider = deepSeekProvider,
+  modelOverride?: string,
 ): Promise<Verification | null> {
   const signal = run.signals.find((s) => s.domain === finding.domain);
   let raw: string;
@@ -34,7 +35,7 @@ export async function verify(
       user: buildVerifierUserPrompt(finding, signal),
       json: true,
       thinking: false,
-      model: config.DEEPSEEK_VERIFY_MODEL,
+      model: modelOverride ?? config.DEEPSEEK_VERIFY_MODEL,
       label: "verifier",
       traceId: run.id,
     });
@@ -79,7 +80,7 @@ export async function verify(
       independent: true,
       promptVersion: PROMPT_VERSION,
       provider: provider.name,
-      model: config.DEEPSEEK_VERIFY_MODEL,
+      model: modelOverride ?? config.DEEPSEEK_VERIFY_MODEL,
       reviewerHadProposerReasoning: false,
     },
     createdAt: new Date().toISOString(),

@@ -180,6 +180,16 @@ export async function runAudit(
           findingId: finding.id,
           traceId,
         });
+
+        // Consenso independente para achados críticos: modelo diferente, mesmo evidence packet.
+        const current = store.getFinding(finding.id);
+        if (config.DEEPSEEK_CONSENSUS_P1 && current?.severity === "P1" && current.status === "verified") {
+          await span(
+            `ai.consensus.${finding.id}`,
+            () => verify(current, run, provider, "deepseek-v4-pro"),
+            { runId: id, findingId: finding.id, traceId },
+          );
+        }
       }
     } else {
       logger.info("pipeline.ai_skipped", {

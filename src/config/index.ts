@@ -14,6 +14,8 @@ const EnvSchema = z.object({
   DEEPSEEK_BASE_URL: z.string().url().default("https://api.deepseek.com"),
   DEEPSEEK_MODEL: z.string().min(1).default("deepseek-flash"),
   DEEPSEEK_VERIFY_MODEL: z.string().min(1).default("deepseek-flash"),
+  /** Segunda verificação independente (modelo diferente) para achados P1. */
+  DEEPSEEK_CONSENSUS_P1: boolString.default(false),
   DEEPSEEK_THINKING: boolString.default(false),
   // Valores aceitos pela API DeepSeek: none | low | high | max.
   DEEPSEEK_REASONING_EFFORT: z.enum(["none", "low", "high", "max"]).default("low"),
@@ -27,6 +29,9 @@ const EnvSchema = z.object({
   PLAYWRIGHT_HEADLESS: boolString.default(true),
   PLAYWRIGHT_VIEWPORT: z.string().default("1440x900"),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().trim().default(""),
+  /** Webhook opcional acionado quando aparece um achado P1 novo. */
+  WEBHOOK_URL: z.string().trim().default(""),
+  WEBHOOK_SECRET: z.string().trim().default(""),
 });
 
 export type Config = z.infer<typeof EnvSchema> & {
