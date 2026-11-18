@@ -9,6 +9,7 @@ import { events } from "../shared/events.js";
 import { newId, store } from "../storage/index.js";
 import type { AuditOptions, Domain, TargetType } from "../shared/types.js";
 import { logger } from "../observability/index.js";
+import { snapshot } from "../observability/metrics.js";
 
 const dashboardDir = resolve(process.cwd(), "dashboard/dist");
 
@@ -34,6 +35,7 @@ export async function startServer(port = config.PORT): Promise<void> {
   app.options("/*", async (_request, reply) => reply.code(204).send());
 
   app.get("/api/health", async () => ({ ok: true, version: "1.0.0" }));
+  app.get("/api/metrics", async () => snapshot());
   app.get("/api/config", async () => ({
     model: config.DEEPSEEK_MODEL,
     verifyModel: config.DEEPSEEK_VERIFY_MODEL,
@@ -67,12 +69,33 @@ export async function startServer(port = config.PORT): Promise<void> {
     };
   });
 
-  app.post("/api/audit", async (request, reply) => {
+  app.post("/api/audit", {
+    schema: {
+      body: {
+        type: "object",
+        required: ["target"],
+        additionalProperties: false,
+        properties: {
+          target: { type: "string", minLength: 1 },
+          type: { type: "string", enum: ["url", "path"] },
+          domains: {
+            type: "array",
+            items: { type: "string", enum: ["design", "backend", "code"] },
+          },
+          useAI: { type: "boolean" },
+          allowPrivateHosts: { type: "boolean" },
+          allowMutatingRequests: { type: "boolean" },
+        },
+      },
+    },
+  }, async (request, reply) => {
     const body = (request.body ?? {}) as {
       target?: string;
       type?: TargetType;
       domains?: Domain[];
       useAI?: boolean;
+      allowPrivateHosts?: boolean;
+      allowMutatingRequests?: boolean;
     };
     if (!body.target || typeof body.target !== "string") {
       return reply.code(400).send({ error: "Campo 'target' é obrigatório." });
@@ -81,6 +104,8 @@ export async function startServer(port = config.PORT): Promise<void> {
       type: body.type,
       domains: body.domains,
       useAI: body.useAI,
+      allowPrivateHosts: body.allowPrivateHosts,
+      allowMutatingRequests: body.allowMutatingRequests,
     };
     // Execução em background: o progresso chega por /api/events (SSE).
     setImmediate(() => {
@@ -126,12 +151,31 @@ export async function startServer(port = config.PORT): Promise<void> {
     setFindingStatus(request.params.id, "approved", ""),
   );
 
-  app.post<{ Params: { id: string } }>("/api/findings/:id/reject", async (request) => {
+  app.post<{ Params: { id: string } }>("/api/findings/:id/reject", {
+    schema: {
+      body: {
+        type: "object",
+        additionalProperties: false,
+        properties: { reason: { type: "string", maxLength: 2000 } },
+      },
+    },
+  }, async (request) => {
     const body = (request.body ?? {}) as { reason?: string };
     return setFindingStatus(request.params.id, "rejected", body.reason ?? "Rejeitado no dashboard");
   });
 
-  app.post("/api/apply", async (request) => {
+  app.post("/api/apply", {
+    schema: {
+      body: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          runId: { type: "string" },
+          reaudit: { type: "boolean" },
+        },
+      },
+    },
+  }, async (request) => {
     const body = (request.body ?? {}) as { runId?: string; reaudit?: boolean };
     const results = await applyApproved(body.runId);
     if (body.reaudit) {

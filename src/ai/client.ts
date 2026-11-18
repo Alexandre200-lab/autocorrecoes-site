@@ -1,5 +1,7 @@
 import { config, requireApiKey } from "../config/index.js";
 import { logger } from "../observability/index.js";
+import { recordAi } from "../observability/metrics.js";
+import { redactSecrets } from "../security/redact.js";
 import type { BudgetState } from "../shared/types.js";
 
 /**
@@ -86,17 +88,20 @@ export async function complete(args: CompletionArgs): Promise<string> {
 
   const key = requireApiKey();
   const thinking = args.thinking ?? config.DEEPSEEK_THINKING;
+  // Redação defensiva: mesmo que um auditor esqueça de redatar, o segredo não sai.
+  const systemText = redactSecrets(sanitize(args.system));
+  const userText = redactSecrets(sanitize(args.user));
   const userContent: unknown = args.images?.length
     ? [
-        { type: "text", text: sanitize(args.user) },
+        { type: "text", text: userText },
         ...args.images.map((url) => ({ type: "image_url", image_url: { url } })),
       ]
-    : sanitize(args.user);
+    : userText;
 
   const body: Record<string, unknown> = {
     model: args.model ?? config.DEEPSEEK_MODEL,
     messages: [
-      { role: "system", content: sanitize(args.system) },
+      { role: "system", content: systemText },
       { role: "user", content: userContent },
     ],
     stream: false,
@@ -114,6 +119,10 @@ export async function complete(args: CompletionArgs): Promise<string> {
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    // Revalida o teto a cada tentativa: retries não podem estourar o orçamento.
+    if (budget.limitUsd > 0 && budget.spentUsd >= budget.limitUsd) {
+      throw new BudgetExceededError(budget.limitUsd);
+    }
     try {
       const response = await fetch(url, {
         method: "POST",
@@ -154,6 +163,10 @@ export async function complete(args: CompletionArgs): Promise<string> {
       budget.completionTokens += usage.completion_tokens ?? 0;
       budget.cachedTokens += usage.prompt_tokens_details?.cached_tokens ?? 0;
       budget.spentUsd += cost;
+      recordAi(
+        { prompt: usage.prompt_tokens ?? 0, completion: usage.completion_tokens ?? 0 },
+        cost,
+      );
 
       logger.info("ai.completion", {
         label: args.label ?? "completion",

@@ -5,12 +5,14 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, extname, join, relative, resolve } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { config } from "../config/index.js";
 import { logger } from "../observability/index.js";
+import { recordApply } from "../observability/metrics.js";
 import { newId, store } from "../storage/index.js";
 import type { Finding, Patch } from "../shared/types.js";
 import { assertNoSuppression } from "./antiSuppression.js";
@@ -26,8 +28,19 @@ export function safeResolve(root: string, file: string): string {
   }
   const rootAbs = resolve(root);
   const abs = resolve(rootAbs, normalized);
-  if (abs !== rootAbs && !abs.startsWith(`${rootAbs}/`)) {
-    throw new Error(`Arquivo fora do repositório: ${file}`);
+  const rootReal = realpathSync(rootAbs);
+
+  // realpath bloqueia symlinks que apontam para fora do repositório.
+  let check = abs;
+  if (existsSync(abs)) {
+    check = realpathSync(abs);
+  } else {
+    let parent = dirname(abs);
+    while (!existsSync(parent) && parent !== dirname(parent)) parent = dirname(parent);
+    check = join(realpathSync(parent), relative(parent, abs));
+  }
+  if (check !== rootReal && !check.startsWith(rootReal + sep)) {
+    throw new Error(`Arquivo fora do repositório (symlink): ${file}`);
   }
   return abs;
 }
@@ -179,15 +192,21 @@ export async function applyFinding(finding: Finding): Promise<ApplyResult> {
   // Alvo remoto: nunca escrevemos em servidor de terceiros. Exportamos o patch.
   if (run.targetType === "url") {
     const artifact = exportArtifact(finding, patch);
-    store.updateFinding(finding.id, { status: "applied", patch: { ...patch, exportedArtifact: artifact } });
-    store.addReceipt({
-      id: newId("rcpt"),
-      runId: run.id,
-      findingId: finding.id,
-      kind: "application",
-      payload: { mode: "export", artifact, note: "Alvo remoto: patch exportado, não aplicado." },
-      createdAt: new Date().toISOString(),
+    store.transaction(() => {
+      store.updateFinding(finding.id, {
+        status: "applied",
+        patch: { ...patch, exportedArtifact: artifact },
+      });
+      store.addReceipt({
+        id: newId("rcpt"),
+        runId: run.id,
+        findingId: finding.id,
+        kind: "application",
+        payload: { mode: "export", artifact, note: "Alvo remoto: patch exportado, não aplicado." },
+        createdAt: new Date().toISOString(),
+      });
     });
+    recordApply(true);
     return {
       findingId: finding.id,
       applied: true,
@@ -203,6 +222,7 @@ export async function applyFinding(finding: Finding): Promise<ApplyResult> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     store.updateFinding(finding.id, { status: "failed", rejectionReason: message });
+    recordApply(false);
     return { findingId: finding.id, applied: false, message, checks: [] };
   }
 
@@ -221,6 +241,7 @@ export async function applyFinding(finding: Finding): Promise<ApplyResult> {
         rejectionReason: `Checks falharam após aplicação; rollback automático. ${checks.output.join(" | ").slice(0, 1000)}`,
       });
       logger.warn("patch.rollback", { findingId: finding.id, restored });
+      recordApply(false);
       return {
         findingId: finding.id,
         applied: false,
@@ -230,21 +251,24 @@ export async function applyFinding(finding: Finding): Promise<ApplyResult> {
       };
     }
 
-    store.updateFinding(finding.id, { status: "applied" });
-    store.addReceipt({
-      id: newId("rcpt"),
-      runId: run.id,
-      findingId: finding.id,
-      kind: "application",
-      payload: {
-        mode: "filesystem",
-        files: patch.files,
-        backup: relative(config.dataDir, backupDir(run.id, finding.id)),
-        checks: checks.output,
-        humanDecision: "approved by operator",
-      },
-      createdAt: new Date().toISOString(),
+    store.transaction(() => {
+      store.updateFinding(finding.id, { status: "applied" });
+      store.addReceipt({
+        id: newId("rcpt"),
+        runId: run.id,
+        findingId: finding.id,
+        kind: "application",
+        payload: {
+          mode: "filesystem",
+          files: patch.files,
+          backup: relative(config.dataDir, backupDir(run.id, finding.id)),
+          checks: checks.output,
+          humanDecision: "approved by operator",
+        },
+        createdAt: new Date().toISOString(),
+      });
     });
+    recordApply(true);
     return {
       findingId: finding.id,
       applied: true,
@@ -256,6 +280,7 @@ export async function applyFinding(finding: Finding): Promise<ApplyResult> {
     const message = error instanceof Error ? error.message : String(error);
     store.updateFinding(finding.id, { status: "failed", rejectionReason: message });
     logger.error("patch.apply.failed", { findingId: finding.id, message, restored });
+    recordApply(false);
     return { findingId: finding.id, applied: false, message, checks: [], rolledBack: restored.length > 0 };
   }
 }

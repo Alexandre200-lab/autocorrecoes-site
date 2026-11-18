@@ -15,12 +15,13 @@ test("auditor backend detecta headers de segurança ausentes", async () => {
   try {
     const result = await backendAuditor.audit(
       `http://127.0.0.1:${port}`,
-      {},
+      { allowPrivateHosts: true },
       { runId: "test", traceId: "test" },
     );
     const rules = result.signals.map((s) => s.ruleId);
     assert.ok(rules.includes("MISSING_HEADER_CONTENT_SECURITY_POLICY"));
-    assert.ok(rules.includes("MISSING_HEADER_STRICT_TRANSPORT_SECURITY"));
+    // HSTS não é esperado em http:// (evita falso positivo).
+    assert.ok(!rules.includes("MISSING_HEADER_STRICT_TRANSPORT_SECURITY"));
     assert.ok(result.checksRun.some((c) => c.includes("HTTP GET")));
   } finally {
     server.close();

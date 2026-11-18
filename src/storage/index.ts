@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config/index.js";
+import { runMigrations } from "./migrations.js";
 import type {
   AuditRun,
   Finding,
@@ -16,77 +17,7 @@ mkdirSync(config.dataDir, { recursive: true });
 const db = new DatabaseSync(join(config.dataDir, "autocorrecoes.db"));
 db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS runs (
-    id TEXT PRIMARY KEY,
-    target_type TEXT NOT NULL,
-    target TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    finished_at TEXT,
-    status TEXT NOT NULL,
-    base_commit TEXT,
-    head_commit TEXT,
-    error TEXT,
-    checks_run TEXT NOT NULL DEFAULT '[]',
-    checks_not_run TEXT NOT NULL DEFAULT '[]'
-  );
-
-  CREATE TABLE IF NOT EXISTS signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    domain TEXT NOT NULL,
-    rule_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    message TEXT NOT NULL,
-    severity TEXT NOT NULL,
-    path TEXT,
-    line INTEGER,
-    url TEXT,
-    selector TEXT,
-    evidence TEXT NOT NULL,
-    metadata TEXT NOT NULL DEFAULT '{}'
-  );
-
-  CREATE TABLE IF NOT EXISTS findings (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    source_rule_id TEXT,
-    domain TEXT NOT NULL,
-    severity TEXT NOT NULL,
-    path TEXT,
-    line INTEGER,
-    url TEXT,
-    title TEXT NOT NULL,
-    observed_behavior TEXT NOT NULL,
-    impact TEXT NOT NULL,
-    evidence TEXT NOT NULL,
-    suggested_fix TEXT NOT NULL,
-    confidence TEXT NOT NULL,
-    checks_run TEXT NOT NULL DEFAULT '[]',
-    checks_suggested TEXT NOT NULL DEFAULT '[]',
-    uncertainty TEXT NOT NULL,
-    status TEXT NOT NULL,
-    patch TEXT,
-    verifier_note TEXT NOT NULL DEFAULT '',
-    verifier_confidence TEXT NOT NULL DEFAULT 'low',
-    rejection_reason TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS receipts (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    finding_id TEXT,
-    kind TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_signals_run ON signals(run_id);
-  CREATE INDEX IF NOT EXISTS idx_findings_run ON findings(run_id);
-  CREATE INDEX IF NOT EXISTS idx_receipts_run ON receipts(run_id);
-`);
+runMigrations(db);
 
 function parse<T>(value: unknown, fallback: T): T {
   if (typeof value !== "string") return fallback;
@@ -185,6 +116,19 @@ function toFinding(row: FindingRow): Finding {
 }
 
 export const store = {
+  /** Agrupa escritas relacionadas (status + receipt) em uma única transação. */
+  transaction<T>(fn: () => T): T {
+    db.exec("BEGIN");
+    try {
+      const result = fn();
+      db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  },
+
   createRun(run: AuditRun): void {
     db.prepare(
       `INSERT INTO runs (id, target_type, target, started_at, status, base_commit, head_commit, checks_run, checks_not_run)
@@ -214,7 +158,8 @@ export const store = {
       `UPDATE runs SET status = ?, finished_at = ?, error = ?, checks_run = ?, checks_not_run = ? WHERE id = ?`,
     ).run(
       patch.status ?? "completed",
-      patch.finishedAt ?? new Date().toISOString(),
+      patch.finishedAt ??
+        (patch.status && patch.status !== "running" ? new Date().toISOString() : null),
       patch.error ?? null,
       JSON.stringify(patch.checksRun ?? parse(current.checks_run, [])),
       JSON.stringify(patch.checksNotRun ?? parse(current.checks_not_run, [])),

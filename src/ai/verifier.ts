@@ -3,8 +3,8 @@ import { logger } from "../observability/index.js";
 import { newId, store } from "../storage/index.js";
 import { events } from "../shared/events.js";
 import type { AuditRun, Finding } from "../shared/types.js";
-import { complete } from "./client.js";
-import { SYSTEM_VERIFIER, buildVerifierUserPrompt } from "./prompts/index.js";
+import { deepSeekProvider, type AiProvider } from "./provider.js";
+import { PROMPT_VERSION, SYSTEM_VERIFIER, buildVerifierUserPrompt } from "./prompts/index.js";
 import { VerificationSchema, type Verification } from "./schemas.js";
 
 function stripFences(text: string): string {
@@ -21,11 +21,15 @@ function stripFences(text: string): string {
  * Verificador independente: recebe apenas achado, evidência e patch.
  * Nunca recebe o raciocínio do Proposer — evita auto-confirmação.
  */
-export async function verify(finding: Finding, run: AuditRun): Promise<Verification | null> {
+export async function verify(
+  finding: Finding,
+  run: AuditRun,
+  provider: AiProvider = deepSeekProvider,
+): Promise<Verification | null> {
   const signal = run.signals.find((s) => s.domain === finding.domain);
   let raw: string;
   try {
-    raw = await complete({
+    raw = await provider.complete({
       system: SYSTEM_VERIFIER,
       user: buildVerifierUserPrompt(finding, signal),
       json: true,
@@ -73,6 +77,8 @@ export async function verify(finding: Finding, run: AuditRun): Promise<Verificat
       ...result,
       status,
       independent: true,
+      promptVersion: PROMPT_VERSION,
+      provider: provider.name,
       model: config.DEEPSEEK_VERIFY_MODEL,
       reviewerHadProposerReasoning: false,
     },

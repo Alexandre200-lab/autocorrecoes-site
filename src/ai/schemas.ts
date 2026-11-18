@@ -5,6 +5,9 @@ const severity = z.enum(["P1", "P2", "P3", "P4"]);
 const confidence = z.enum(["high", "medium", "low"]);
 
 export const ProposedFindingSchema = z.object({
+  /** Obrigatório para rastrear qual sinal determinístico originou o achado. */
+  sourceRuleId: z.string().min(1),
+  signalIndex: z.number().int().positive().optional(),
   domain,
   severity,
   path: z.string().optional(),

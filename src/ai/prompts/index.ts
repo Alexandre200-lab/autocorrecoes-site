@@ -1,5 +1,8 @@
 import type { AuditRun, Finding, RawSignal } from "../../shared/types.js";
 
+/** Versionado para reproduzir auditorias antigas: vai para o receipt. */
+export const PROMPT_VERSION = "1.2.0";
+
 /** Delimita conteúdo não confiável para reduzir risco de prompt injection. */
 export function wrapUntrusted(content: string, label: string): string {
   const safe = String(content)
@@ -34,14 +37,20 @@ REGRAS DE CORREÇÃO:
   "checksSuggested" (testes que você recomenda, mas NÃO executou).
 - Campo "uncertainty" é obrigatório: diga onde você não tem certeza.
 - Se um sinal for falso positivo, omita-o dos findings (não invente problema).
+- Para CADA achado, copie exatamente o ruleId e o número do sinal de origem
+  (cabeçalho "### Sinal N [REGRA]") para "sourceRuleId" e "signalIndex".
+  Isso é obrigatório: sem isso a re-auditoria não consegue verificar a correção.
 - Responda SOMENTE com um objeto JSON válido no formato:
-  {"findings":[{"domain":"design|backend|code","severity":"P1|P2|P3|P4",
+  {"findings":[{"sourceRuleId":"REGRA_DO_SINAL","signalIndex":1,
+  "domain":"design|backend|code","severity":"P1|P2|P3|P4",
   "path":"...","line":1,"url":"...","title":"...","observedBehavior":"...","impact":"...",
   "evidence":"...","suggestedFix":"...","confidence":"high|medium|low",
   "checksRun":[],"checksSuggested":[],"uncertainty":"...",
   "patch":{"format":"unified-diff|full-file|css-rule|config-change","files":["..."],
   "content":"...","riskNotes":[],"untouchedAssertion":[]}}]}
-  Use "patch": null se não houver patch seguro para aplicar (apenas orientação).`.trim();
+  Use "patch": null se não houver patch seguro para aplicar (apenas orientação).
+
+  [prompt-version:${PROMPT_VERSION}]`.trim();
 
 export const SYSTEM_VERIFIER = `Você é um revisor independente de mudanças, atuando como verificador final de um sistema de auditoria por IA.
 Você NÃO viu o raciocínio de quem propôs a correção — recebe apenas o achado, a evidência original e o patch proposto.
@@ -59,7 +68,9 @@ CRITÉRIOS DE REPROVAÇÃO:
 Critérios de aprovação: evidência clara, correção mínima e risco compreensível.
 Responda SOMENTE com JSON válido:
 {"valid":true,"reason":"...","confidence":"high|medium|low","suppressionDetected":false,
- "severityAdjusted":"P1|P2|P3|P4","recommendedStatus":"verified|rejected"}`.trim();
+ "severityAdjusted":"P1|P2|P3|P4","recommendedStatus":"verified|rejected"}
+
+[prompt-version:${PROMPT_VERSION}]`.trim();
 
 export function buildProposerUserPrompt(
   run: AuditRun,

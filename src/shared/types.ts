@@ -126,5 +126,7 @@ export interface AuditOptions {
   useAI?: boolean;
   /** Executa verificações mutantes em URLs (desligado por padrão). */
   allowMutatingRequests?: boolean;
+  /** Libera hosts privados/loopback (necessário para testes locais). */
+  allowPrivateHosts?: boolean;
   maxPages?: number;
 }

@@ -6,18 +6,18 @@ import type { RawSignal } from "../shared/types.js";
  */
 export function dedupeSignals(signals: RawSignal[]): RawSignal[] {
   const byKey = new Map<string, RawSignal>();
-  for (const signal of signals) {
+  signals.forEach((signal, index) => {
     const location = [signal.path ?? signal.url ?? "", signal.selector ?? "", String(signal.line ?? "")]
       .filter(Boolean)
       .join("|");
     const key = signal.metadata?.requiresHuman
-      ? `human:${signal.ruleId}:${location}:${Math.random()}`
+      ? `human:${index}:${signal.ruleId}:${location}`
       : `${signal.domain}:${signal.ruleId}:${location}`;
 
     const existing = byKey.get(key);
     if (!existing || signal.evidence.length > existing.evidence.length) {
       byKey.set(key, signal);
     }
-  }
+  });
   return [...byKey.values()];
 }

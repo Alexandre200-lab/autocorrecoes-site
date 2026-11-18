@@ -54,6 +54,13 @@ npm run cli -- audit ./meu-projeto
 # Coletar sinais sem gastar tokens de IA
 npm run cli -- audit https://exemplo.com --no-ai
 
+# Auditar servidor local (hosts privados são bloqueados por padrão)
+npm run cli -- audit http://127.0.0.1:3000 --allow-private-hosts
+
+# Gate de CI: relatório SARIF e exit code 1 se houver achado P2 ou pior
+node dist/cli/index.js audit https://exemplo.com --no-ai \
+  --format sarif --fail-on P2 --output results.sarif
+
 # Ver achados da última execução
 npm run cli -- report
 
@@ -119,7 +126,12 @@ Backups ficam em `data/backups/<runId>/<findingId>/`. Patches para alvos remotos
 ## Segurança
 
 - Chave apenas em `.env` (nunca no código, nunca enviada ao alvo).
+- **Redação de segredos** antes de qualquer trecho do alvo sair do processo (`src/security/redact.ts`), aplicada tanto no auditor quanto no cliente de IA (defesa em profundidade).
+- **Proteção SSRF**: hosts loopback/privados/link-local são bloqueados por padrão (`src/security/network.ts`); use `--allow-private-hosts` apenas em testes locais.
+- `safeResolve` usa `realpath` para impedir escape por **symlink**.
 - Conteúdo de código/HTML/diff tratado como **dado não confiável** e delimitado antes do prompt.
+- Anti-supressão cobre `aria-hidden`, `display:none`, `visibility`, `opacity:0`, `pointer-events`, `inert`, `disableRules`, `eslint-disable`, `@ts-*` e desligamento de testes/CI.
+- **Migrações versionadas** (`src/storage/migrations.ts`) e escritas transacionais para status + receipts.
 - Verifier não recebe raciocínio do Proposer (evita auto-confirmação).
 - Anti-supressão bloqueia patches fraudulentos.
 - `safeResolve` impede path traversal; `git diff --check` + `npm run typecheck` rodam após cada apply.
@@ -141,8 +153,23 @@ Backups ficam em `data/backups/<runId>/<findingId>/`. Patches para alvos remotos
 | `POST` | `/api/apply` | Aplica aprovados (`{ runId?, reaudit? }`) |
 | `POST` | `/api/runs/:id/rollback` | Restaura backups |
 | `GET` | `/api/events` | Server-Sent Events com progresso |
+| `GET` | `/api/metrics` | Contadores (auditorias, achados por severidade, custo de IA, applies) |
+
+> Em pipelines de CI, invoque `node dist/cli/index.js` (ou `npx tsx src/cli/index.ts`) em vez de
+> `npm run cli --` — o npm imprime cabeçalhos no stdout e pode corromper relatórios SARIF/JSON.
 
 ---
+
+## Avaliação da qualidade da IA
+
+O dataset em `eval/cases.json` mede precisão, recall e bloqueio de patches supressivos:
+
+```bash
+EVAL_MOCK=1 npm run eval   # valida o harness sem gastar tokens
+npm run eval               # usa DeepSeek real (consome orçamento)
+```
+
+O relatório é gravado em `eval/last-report.json`.
 
 ## Testes
 

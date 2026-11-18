@@ -1,13 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
+import { config } from "../config/index.js";
 import { logger } from "../observability/index.js";
+import { recordFinding } from "../observability/metrics.js";
 import { validatePatch } from "../patches/index.js";
 import { isSuppression } from "../patches/antiSuppression.js";
 import { newId, store } from "../storage/index.js";
 import { events } from "../shared/events.js";
 import type { AuditRun, Finding, RawSignal } from "../shared/types.js";
 import { resolveLocalTarget } from "../auditors/url.js";
-import { complete } from "./client.js";
-import { SYSTEM_PROPOSER, buildProposerUserPrompt } from "./prompts/index.js";
+import { deepSeekProvider, type AiProvider } from "./provider.js";
+import { PROMPT_VERSION, SYSTEM_PROPOSER, buildProposerUserPrompt } from "./prompts/index.js";
 import { ProposalSchema, type ProposedFinding } from "./schemas.js";
 
 const CHUNK_SIZE = 10;
@@ -37,8 +39,17 @@ function screenshotsFrom(context: string): string[] {
 function toFinding(
   proposal: ProposedFinding,
   run: AuditRun,
-  signal: RawSignal | undefined,
+  chunk: RawSignal[],
 ): Finding {
+  const signal =
+    (proposal.signalIndex ? chunk[proposal.signalIndex - 1] : undefined) ??
+    chunk.find((s) => s.ruleId === proposal.sourceRuleId) ??
+    chunk.find((s) => s.path === proposal.path && s.line === proposal.line) ??
+    chunk[0];
+  const provenanceNote =
+    signal?.ruleId === proposal.sourceRuleId
+      ? ""
+      : ` Origem incerta: ruleId "${proposal.sourceRuleId}" não correspondeu a um sinal do lote.`;
   const now = new Date().toISOString();
   const patch = proposal.patch
     ? {
@@ -68,7 +79,7 @@ function toFinding(
     confidence: proposal.confidence,
     checksRun: proposal.checksRun.length ? proposal.checksRun : run.checksRun,
     checksSuggested: proposal.checksSuggested,
-    uncertainty: proposal.uncertainty,
+    uncertainty: `${proposal.uncertainty}${provenanceNote}`,
     status: "proposed",
     patch: patch ? { ...patch, findingId: "" } : null,
     verifierNote: "",
@@ -79,7 +90,11 @@ function toFinding(
   };
 }
 
-export async function propose(run: AuditRun, context: string): Promise<Finding[]> {
+export async function propose(
+  run: AuditRun,
+  context: string,
+  provider: AiProvider = deepSeekProvider,
+): Promise<Finding[]> {
   // Sinais que exigem julgamento humano não viram patch automático.
   const eligible = run.signals.filter((s) => !s.metadata?.requiresHuman && !s.metadata?.infrastructure);
   if (eligible.length === 0) return [];
@@ -88,15 +103,17 @@ export async function propose(run: AuditRun, context: string): Promise<Finding[]
   const images = run.signals.some((s) => s.domain === "design") ? screenshotsFrom(context) : [];
   const contextForAi = context.slice(0, MAX_CONTEXT_CHARS);
   const created: Finding[] = [];
+  const seen = new Set<string>();
 
   const domains = [...new Set(eligible.map((s) => s.domain))];
   for (const domain of domains) {
     const domainSignals = eligible.filter((s) => s.domain === domain);
     for (let i = 0; i < domainSignals.length; i += CHUNK_SIZE) {
       const chunk = domainSignals.slice(i, i + CHUNK_SIZE);
+      const beforeChunk = created.length;
       let raw: string;
       try {
-        raw = await complete({
+        raw = await provider.complete({
           system: SYSTEM_PROPOSER,
           user: buildProposerUserPrompt(run, chunk, contextForAi),
           json: true,
@@ -136,7 +153,10 @@ export async function propose(run: AuditRun, context: string): Promise<Finding[]
           logger.warn("ai.proposer.suppression_blocked", { runId: run.id, reasons });
           continue;
         }
-        const finding = toFinding(proposal, run, chunk[0]);
+        const finding = toFinding(proposal, run, chunk);
+        const key = `${finding.sourceRuleId ?? ""}|${finding.path ?? finding.url ?? ""}|${finding.title}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
         if (finding.patch) {
           try {
             validatePatch(finding.patch, root);
@@ -150,6 +170,7 @@ export async function propose(run: AuditRun, context: string): Promise<Finding[]
           }
         }
         store.createFinding(finding);
+        recordFinding(finding.severity);
         created.push(finding);
         events.emitEvent({
           type: "finding:created",
@@ -158,6 +179,23 @@ export async function propose(run: AuditRun, context: string): Promise<Finding[]
           status: finding.status,
         });
       }
+
+      store.addReceipt({
+        id: newId("rcpt"),
+        runId: run.id,
+        kind: "proposal",
+        payload: {
+          promptVersion: PROMPT_VERSION,
+          provider: provider.name,
+          model: config.DEEPSEEK_MODEL,
+          domain,
+          signalCount: chunk.length,
+          proposedCount: created.length - beforeChunk,
+          sourceRuleIds: chunk.map((s) => s.ruleId),
+          imagesSent: domain === "design" ? images.length : 0,
+        },
+        createdAt: new Date().toISOString(),
+      });
     }
   }
   return created;

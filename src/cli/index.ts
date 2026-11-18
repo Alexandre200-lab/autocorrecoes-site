@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { Command } from "commander";
 import { config } from "../config/index.js";
 import { getBudget } from "../ai/client.js";
 import { reauditFinding, runAudit } from "../pipeline/index.js";
 import { applyApproved, rollbackRun } from "../patches/index.js";
 import { newId, store } from "../storage/index.js";
+import { toSarif } from "../report/sarif.js";
 import type { Domain, Finding, TargetType } from "../shared/types.js";
 
 const program = new Command();
@@ -43,6 +44,38 @@ function printFindings(findings: Finding[]): void {
   }
 }
 
+/** Sem IA, os sinais brutos também viram itens de gate/relatório. */
+function signalsToFindings(run: Awaited<ReturnType<typeof runAudit>>["run"]): Finding[] {
+  return run.signals
+    .filter((signal) => !signal.metadata?.infrastructure && !signal.metadata?.requiresHuman)
+    .map((signal) => ({
+      id: `signal:${signal.ruleId}`,
+      runId: run.id,
+      sourceRuleId: signal.ruleId,
+      domain: signal.domain,
+      severity: signal.severity,
+      path: signal.path,
+      line: signal.line,
+      url: signal.url,
+      title: signal.title,
+      observedBehavior: signal.message,
+      impact: signal.message,
+      evidence: signal.evidence,
+      suggestedFix: "Revisar sinal determinístico e aplicar correção adequada.",
+      confidence: "high",
+      checksRun: run.checksRun,
+      checksSuggested: [],
+      uncertainty: "Achado bruto: a IA não foi executada nesta auditoria.",
+      status: "detected",
+      patch: null,
+      verifierNote: "",
+      verifierConfidence: "low",
+      rejectionReason: "",
+      createdAt: run.startedAt,
+      updatedAt: run.startedAt,
+    }));
+}
+
 function parseDomains(value?: string): Domain[] | undefined {
   if (!value) return undefined;
   const parts = value.split(",").map((v) => v.trim().toLowerCase());
@@ -65,7 +98,11 @@ program
   .option("--domains <lista>", "design,backend,code (separados por vírgula)")
   .option("--no-ai", "coleta sinais sem chamar DeepSeek")
   .option("--allow-mutating-requests", "permete OPTIONS no alvo remoto")
-  .option("--json", "saída em JSON")
+  .option("--allow-private-hosts", "libera localhost/privados (use apenas em testes)")
+  .option("--json", "atalho para --format json")
+  .option("--format <formato>", "text | json | sarif", "text")
+  .option("--output <arquivo>", "grava o relatório em arquivo")
+  .option("--fail-on <severidade>", "exit code 1 se houver achado P1|P2|P3|P4 (ou none)")
   .action(async (target: string, opts) => {
     const type: TargetType | undefined = opts.url ? "url" : opts.path ? "path" : undefined;
     const outcome = await runAudit(target, {
@@ -73,24 +110,53 @@ program
       domains: parseDomains(opts.domains),
       useAI: opts.ai !== false,
       allowMutatingRequests: Boolean(opts.allowMutatingRequests),
+      allowPrivateHosts: Boolean(opts.allowPrivateHosts),
     });
-    if (opts.json) {
-      console.log(JSON.stringify(outcome, null, 2));
-      return;
+
+    const format = opts.json ? "json" : (opts.format as string);
+    const effectiveFindings = outcome.findings.length
+      ? outcome.findings
+      : signalsToFindings(outcome.run);
+    const active = effectiveFindings.filter(
+      (f) => !["rejected", "fixed"].includes(f.status),
+    );
+    let report: string | null = null;
+    if (format === "json") {
+      report = JSON.stringify(outcome, null, 2);
+    } else if (format === "sarif") {
+      report = JSON.stringify(toSarif(outcome.run, active), null, 2);
     }
-    console.log(`\nAuditoria ${outcome.run.id} concluída.`);
-    console.log(`Alvo: ${outcome.run.targetType} ${outcome.run.target}`);
-    console.log(
-      `Sinais: ${outcome.run.signals.length} | Achados: ${outcome.findings.length} | ` +
+    if (report && opts.output) {
+      writeFileSync(opts.output, report, "utf8");
+    }
+
+    const log = format === "text" ? console.log : console.error;
+    log(`\nAuditoria ${outcome.run.id} concluída.`);
+    log(`Alvo: ${outcome.run.targetType} ${outcome.run.target}`);
+    log(
+      `Sinais: ${outcome.run.signals.length} | Achados: ${active.length} | ` +
         `Custo IA: $${outcome.budget.spentUsd.toFixed(4)}`,
     );
-    console.log(`Checks executados: ${outcome.run.checksRun.join(", ") || "nenhum"}`);
+    log(`Checks executados: ${outcome.run.checksRun.join(", ") || "nenhum"}`);
     if (outcome.run.checksNotRun.length) {
-      console.log(`Checks não executados: ${outcome.run.checksNotRun.join(", ")}`);
+      log(`Checks não executados: ${outcome.run.checksNotRun.join(", ")}`);
     }
-    printFindings(outcome.findings);
-    if (outcome.findings.length) {
-      console.log(`\nPróximos passos: autocorrecoes approve <id> && autocorrecoes apply --reaudit`);
+    if (format === "text") {
+      printFindings(active);
+      if (active.length) {
+        log(`\nPróximos passos: autocorrecoes approve <id> && autocorrecoes apply --reaudit`);
+      }
+    } else if (report) {
+      console.log(report);
+    }
+
+    if (opts.failOn && opts.failOn !== "none") {
+      const order = ["P4", "P3", "P2", "P1"];
+      const threshold = order.indexOf(opts.failOn as string);
+      if (threshold >= 0 && active.some((f) => order.indexOf(f.severity) >= threshold)) {
+        log(`\nGate CI: falhando por achados >= ${opts.failOn}.`);
+        process.exitCode = 1;
+      }
     }
   });
 

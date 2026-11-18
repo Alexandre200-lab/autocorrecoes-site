@@ -1,4 +1,6 @@
 import { config } from "../../config/index.js";
+import { assertPublicUrl } from "../../security/network.js";
+import { redactSecrets } from "../../security/redact.js";
 import type { AuditOptions, RawSignal } from "../../shared/types.js";
 import type { AuditContext, AuditResult, Auditor } from "../types.js";
 
@@ -30,14 +32,10 @@ async function probe(url: string, method = "GET"): Promise<Probe> {
     status: response.status,
     headers: response.headers,
     latencyMs: Math.round(performance.now() - started),
-    bodySnippet: text.slice(0, 2000),
+    bodySnippet: redactSecrets(text.slice(0, 2000)),
   };
 }
 
-function normalizeUrl(target: string): string {
-  const value = /^https?:\/\//i.test(target) ? target : `https://${target}`;
-  return new URL(value).toString();
-}
 
 export class BackendAuditor implements Auditor {
   readonly domain = "backend" as const;
@@ -46,7 +44,24 @@ export class BackendAuditor implements Auditor {
     const signals: RawSignal[] = [];
     const checksRun: string[] = [];
     const checksNotRun: string[] = [];
-    const url = normalizeUrl(target);
+    let url: string;
+    try {
+      url = (await assertPublicUrl(target, options.allowPrivateHosts)).toString();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      signals.push({
+        domain: "backend",
+        ruleId: "BACKEND_BLOCKED_HOST",
+        title: "Host bloqueado pela proteção SSRF",
+        message,
+        severity: "P2",
+        evidence: message,
+        metadata: { error: true, requiresHuman: true },
+      });
+      checksNotRun.push("HTTP GET (host bloqueado)");
+      return { signals, checksRun, checksNotRun, context: message };
+    }
+    const isHttps = url.startsWith("https://");
 
     let main: Probe;
     try {
@@ -91,6 +106,8 @@ export class BackendAuditor implements Auditor {
     }
 
     for (const [header, title, severity, impact] of SECURITY_HEADERS) {
+      // HSTS só faz sentido em HTTPS; sinalizá-lo em http:// gera falso positivo.
+      if (!isHttps && header === "strict-transport-security") continue;
       const hasAlternative =
         header === "x-frame-options" &&
         /frame-ancestors/i.test(main.headers.get("content-security-policy") ?? "");
@@ -102,7 +119,9 @@ export class BackendAuditor implements Auditor {
           message: `Header ${header} não foi retornado em ${url}.`,
           severity,
           url,
-          evidence: `Headers recebidos: ${JSON.stringify(Object.fromEntries(main.headers.entries()))}`,
+          evidence: redactSecrets(
+            `Headers recebidos: ${JSON.stringify(Object.fromEntries(main.headers.entries()))}`,
+          ),
           metadata: { impact, header },
         });
       }

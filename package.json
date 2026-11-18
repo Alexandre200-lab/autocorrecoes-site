@@ -17,6 +17,7 @@
     "cli": "tsx src/cli/index.ts",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "eval": "tsx scripts/eval.ts",
     "doctor": "tsx src/cli/index.ts doctor"
   },
   "keywords": [

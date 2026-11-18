@@ -1,10 +1,11 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { config, viewport } from "../../config/index.js";
+import { assertPublicUrl } from "../../security/network.js";
+import { redactSecrets } from "../../security/redact.js";
 import type { AuditOptions, RawSignal } from "../../shared/types.js";
 import type { AuditContext, AuditResult, Auditor } from "../types.js";
 import { mapImpactToSeverity } from "../types.js";
-import { normalizeTargetUrl } from "../url.js";
 
 const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"];
 
@@ -21,11 +22,26 @@ interface DomInfo {
 export class DesignAuditor implements Auditor {
   readonly domain = "design" as const;
 
-  async audit(target: string, _options: AuditOptions, ctx: AuditContext): Promise<AuditResult> {
+  async audit(target: string, options: AuditOptions, ctx: AuditContext): Promise<AuditResult> {
     const signals: RawSignal[] = [];
     const checksRun: string[] = [];
     const checksNotRun: string[] = [];
-    const url = normalizeTargetUrl(target);
+    let url: string;
+    try {
+      url = (await assertPublicUrl(target, options.allowPrivateHosts)).toString();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      signals.push({
+        domain: "design",
+        ruleId: "DESIGN_BLOCKED_HOST",
+        title: "Host bloqueado pela proteção SSRF",
+        message,
+        severity: "P2",
+        evidence: message,
+        metadata: { error: true, requiresHuman: true },
+      });
+      return { signals, checksRun, checksNotRun, context: message };
+    }
     let contextLines = [`Alvo: ${url}`, `TraceId: ${ctx.traceId}`];
     const screenshotDir = join(config.dataDir, "screenshots", ctx.runId);
     mkdirSync(screenshotDir, { recursive: true });
@@ -185,8 +201,10 @@ export class DesignAuditor implements Auditor {
             });
           }
           contextLines.push(
-            `DOM ${vp.name}: title="${dom.title}", lang="${dom.lang}", h1=${dom.h1Count}, ` +
-              `brokenImages=${dom.brokenImages.length}, overflow=${dom.horizontalOverflow}`,
+            redactSecrets(
+              `DOM ${vp.name}: title="${dom.title}", lang="${dom.lang}", h1=${dom.h1Count}, ` +
+                `brokenImages=${dom.brokenImages.length}, overflow=${dom.horizontalOverflow}`,
+            ),
           );
 
           // Estado de interação: abre menu/sidebar quando presente.

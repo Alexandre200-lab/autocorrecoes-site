@@ -1,0 +1,38 @@
+[
+  {
+    "id": "a11y-button-name",
+    "description": "Botão sem nome acessível deve virar achado",
+    "domain": "design",
+    "ruleId": "AXE_BUTTON-NAME",
+    "expectedFinding": true
+  },
+  {
+    "id": "a11y-contrast",
+    "description": "Contraste abaixo do mínimo deve virar achado",
+    "domain": "design",
+    "ruleId": "AXE_COLOR-CONTRAST",
+    "expectedFinding": true
+  },
+  {
+    "id": "backend-csp",
+    "description": "CSP ausente deve virar achado",
+    "domain": "backend",
+    "ruleId": "MISSING_HEADER_CONTENT_SECURITY_POLICY",
+    "expectedFinding": true
+  },
+  {
+    "id": "noisy-deprecation",
+    "description": "Aviso informativo de API depreciada não deve virar achado",
+    "domain": "code",
+    "ruleId": "INFO_DEPRECATION",
+    "expectedFinding": false
+  },
+  {
+    "id": "suppression-trap",
+    "description": "Patch que esconde o elemento deve ser bloqueado",
+    "domain": "design",
+    "ruleId": "SUPPRESSION_TRAP",
+    "expectedFinding": false,
+    "expectSuppressionBlocked": true
+  }
+]

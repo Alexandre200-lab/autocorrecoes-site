@@ -2,11 +2,13 @@ import { config } from "../config/index.js";
 import { propose } from "../ai/proposer.js";
 import { verify } from "../ai/verifier.js";
 import { getBudget, resetBudget } from "../ai/client.js";
+import type { AiProvider } from "../ai/provider.js";
 import { designAuditor } from "../auditors/design/index.js";
 import { backendAuditor } from "../auditors/backend/index.js";
 import { codeAuditor } from "../auditors/code/index.js";
 import type { AuditContext, AuditResult, Auditor } from "../auditors/types.js";
 import { newTraceId, logger, span } from "../observability/index.js";
+import { recordAudit } from "../observability/metrics.js";
 import { events } from "../shared/events.js";
 import { newId, store } from "../storage/index.js";
 import type {
@@ -39,6 +41,7 @@ async function collect(
   domains: Domain[] | undefined,
   ctx: AuditContext,
   runId: string,
+  options: AuditOptions = {},
 ): Promise<AuditResult> {
   const signals: RawSignal[] = [];
   const checksRun: string[] = [];
@@ -49,7 +52,7 @@ async function collect(
     events.emitEvent({ type: "audit:progress", runId, domain: auditor.domain, count: signals.length });
     const result = await span(
       `audit.${auditor.domain}`,
-      () => auditor.audit(target, {}, ctx),
+      () => auditor.audit(target, options, ctx),
       { runId, traceId: ctx.traceId, domain: auditor.domain },
     );
     signals.push(...result.signals);
@@ -72,8 +75,13 @@ export interface AuditOutcome {
   budget: ReturnType<typeof getBudget>;
 }
 
-export async function runAudit(target: string, options: AuditOptions = {}): Promise<AuditOutcome> {
+export async function runAudit(
+  target: string,
+  options: AuditOptions = {},
+  provider?: AiProvider,
+): Promise<AuditOutcome> {
   const type = options.type ?? detectTargetType(target);
+  const startedAtMs = performance.now();
   const id = newId("run");
   const traceId = newTraceId();
   const run: AuditRun = {
@@ -91,7 +99,7 @@ export async function runAudit(target: string, options: AuditOptions = {}): Prom
   logger.info("pipeline.started", { runId: id, target, type, traceId });
 
   try {
-    const collected = await collect(target, type, options.domains, { runId: id, traceId }, id);
+    const collected = await collect(target, type, options.domains, { runId: id, traceId }, id, options);
     run.signals = collected.signals;
     run.checksRun = collected.checksRun;
     run.checksNotRun = collected.checksNotRun;
@@ -125,13 +133,13 @@ export async function runAudit(target: string, options: AuditOptions = {}): Prom
       events.emitEvent({ type: "ai:proposing", runId: id });
       findings = await span(
         "ai.propose",
-        () => propose(run, collected.context),
+        () => propose(run, collected.context, provider),
         { runId: id, traceId },
       );
 
       events.emitEvent({ type: "ai:verifying", runId: id });
       for (const finding of findings) {
-        await span(`ai.verify.${finding.id}`, () => verify(finding, run), {
+        await span(`ai.verify.${finding.id}`, () => verify(finding, run, provider), {
           runId: id,
           findingId: finding.id,
           traceId,
@@ -156,6 +164,7 @@ export async function runAudit(target: string, options: AuditOptions = {}): Prom
       });
     }
 
+    recordAudit(Math.round(performance.now() - startedAtMs), false);
     events.emitEvent({ type: "run:finished", runId: id });
     return {
       run: store.getRun(id) ?? run,
@@ -165,6 +174,7 @@ export async function runAudit(target: string, options: AuditOptions = {}): Prom
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     store.updateRun(id, { status: "failed", error: message });
+    recordAudit(Math.round(performance.now() - startedAtMs), true);
     events.emitEvent({ type: "error", runId: id, message });
     logger.error("pipeline.failed", { runId: id, message });
     throw error;

@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
+import { redactSecrets } from "../../security/redact.js";
 import type { AuditOptions, RawSignal } from "../../shared/types.js";
 import type { AuditContext, AuditResult, Auditor } from "../types.js";
 import { resolveLocalTarget } from "../url.js";
@@ -181,7 +182,7 @@ export class CodeAuditor implements Auditor {
           message: `Comando npm run ${script} terminou com falha.`,
           severity: script === "test" ? "P1" : "P2",
           path: "package.json",
-          evidence: result.output.split("\n").slice(0, 40).join("\n").slice(0, 4000),
+          evidence: redactSecrets(result.output.split("\n").slice(0, 40).join("\n").slice(0, 4000)),
           metadata: { command: `npm run ${script}` },
         });
       }
@@ -252,7 +253,7 @@ export class CodeAuditor implements Auditor {
             severity: pattern.severity,
             path: file,
             line,
-            evidence: `${file}:${line}: ${sample}`,
+            evidence: redactSecrets(`${file}:${line}: ${sample}`),
             metadata: { pattern: pattern.re.source },
           });
           count += 1;
@@ -265,7 +266,8 @@ export class CodeAuditor implements Auditor {
 
     contextLines.push(`Arquivos fonte: ${files.length}`);
     contextLines.push(`Scripts: ${JSON.stringify(pkg.scripts ?? {})}`);
-    contextLines.push(`Trechos de código (DADO):${snippets}`);
+    contextLines.push(`Trechos de código (DADO):${redactSecrets(snippets)}`);
+    contextLines.push("Segredos detectados nos trechos foram automaticamente mascarados antes do envio à IA.");
     contextLines.push(
       "Atenção: para patches unified-diff, use o conteúdo exibido nos trechos. " +
         "Preserve imports e comportamentos não relacionados.",
