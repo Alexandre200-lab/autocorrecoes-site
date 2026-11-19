@@ -75,6 +75,7 @@ interface Trend {
 interface PipelineEvent {
   type: string;
   eventId?: number;
+  createdAt?: string;
   runId?: string;
   jobId?: string;
   findingId?: string;
@@ -142,6 +143,7 @@ export default function App() {
       setRunId((current) => current ?? data.runs[0]?.id ?? null);
       const trendData = await getJson<{ trends: Trend[] }>("/api/trends");
       setTrends(trendData.trends);
+      setError("");
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       if (message.includes("401")) setAuthenticated(false);
@@ -180,58 +182,81 @@ export default function App() {
   useEffect(() => {
     let source: EventSource | null = null;
     let closed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
 
-    const connect = async () => {
+    const onMessage = (message: MessageEvent<string>): void => {
+      let event: PipelineEvent;
+      try {
+        event = JSON.parse(message.data) as PipelineEvent;
+      } catch {
+        return;
+      }
+      if (event.eventId) {
+        if (event.eventId <= lastEventIdRef.current) return; // dedupe do replay
+        lastEventIdRef.current = event.eventId;
+      }
+      setEvents((current) => [
+        ...current.slice(-60),
+        `${time(event.createdAt ?? new Date().toISOString())}  ${event.type}`,
+      ]);
+      if (event.type === "error" && event.message) setError(event.message);
+      if (event.type === "run:started" || event.type === "run:finished") void loadRuns();
+      if (event.type === "job:finished" && event.jobId === currentJobIdRef.current && event.runId) {
+        setRunId(event.runId);
+        void loadRuns();
+        setBusy(false);
+      }
+      if (
+        event.runId &&
+        event.runId === runId &&
+        ["finding:created", "finding:updated", "audit:finished", "run:finished"].includes(
+          event.type,
+        )
+      ) {
+        void loadRun(event.runId);
+      }
+    };
+
+    const scheduleReconnect = (): void => {
+      if (closed || reconnectTimer) return;
+      attempts += 1;
+      const delay = Math.min(1000 * 2 ** Math.min(attempts, 4), 15_000);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void connect();
+      }, delay);
+    };
+
+    const connect = async (): Promise<void> => {
+      if (closed) return;
       const params = new URLSearchParams();
       if (authRequired) {
         try {
+          // Ticket novo a cada conexão: o antigo expira em ~2 min.
           const { ticket } = await postJson<{ ticket: string }>("/api/events/ticket");
           params.set("ticket", ticket);
         } catch {
+          scheduleReconnect();
           return;
         }
       }
       if (closed) return;
       if (runId) params.set("runId", runId);
       if (lastEventIdRef.current) params.set("afterId", String(lastEventIdRef.current));
-      const query = params.toString();
-      source = new EventSource(`/api/events${query ? `?${query}` : ""}`);
-      source.onmessage = (message) => {
-        let event: PipelineEvent;
-        try {
-          event = JSON.parse(message.data) as PipelineEvent;
-        } catch {
-          return;
-        }
-        if (event.eventId) {
-          if (event.eventId <= lastEventIdRef.current) return; // dedupe do replay
-          lastEventIdRef.current = event.eventId;
-        }
-        setEvents((current) => [
-          ...current.slice(-60),
-          `${time(new Date().toISOString())}  ${event.type}`,
-        ]);
-        if (event.type === "error" && event.message) setError(event.message);
-        if (event.type === "run:started" || event.type === "run:finished") void loadRuns();
-        if (event.type === "job:finished" && event.jobId === currentJobIdRef.current && event.runId) {
-          setRunId(event.runId);
-          void loadRuns();
-          setBusy(false);
-        }
-        if (
-          event.runId &&
-          event.runId === runId &&
-          ["finding:created", "finding:updated", "audit:finished", "run:finished"].includes(
-            event.type,
-          )
-        ) {
-          void loadRun(event.runId);
-        }
+      source = new EventSource(`/api/events?${params.toString()}`);
+      source.onmessage = onMessage;
+      source.onerror = () => {
+        source?.close();
+        source = null;
+        scheduleReconnect();
       };
     };
+
     void connect();
     return () => {
       closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       source?.close();
     };
   }, [runId, authRequired, loadRuns, loadRun]);
@@ -292,8 +317,24 @@ export default function App() {
   };
 
   const setStatus = async (id: string, status: "approved" | "rejected") => {
-    await postJson(`/api/findings/${id}/${status}`, { reason: "Decisão registrada no dashboard" });
-    if (runId) await loadRun(runId);
+    try {
+      await postJson(`/api/findings/${id}/${status}`, { reason: "Decisão registrada no dashboard" });
+      if (runId) await loadRun(runId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await postJson("/api/auth/logout");
+      setAuthenticated(false);
+      setRuns([]);
+      setRun(null);
+      setFindings([]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const applyAll = async () => {
@@ -335,7 +376,12 @@ export default function App() {
           <h1>AutoCorrecoes</h1>
           <p>Auditoria e autocorreção com fiscalização independente por DeepSeek</p>
         </div>
-        <span className="pill">v1.0</span>
+        <div className="header-actions">
+          {authRequired && authenticated && (
+            <button onClick={() => void logout()}>Sair</button>
+          )}
+          <span className="pill">v1.0</span>
+        </div>
       </header>
 
       {authRequired && !authenticated && (
@@ -369,7 +415,7 @@ export default function App() {
         </button>
       </section>
 
-      {error && <div className="error">{error}</div>}
+      {error && <div className="error" role="alert" aria-live="assertive">{error}</div>}
 
       <div className="layout">
         <aside className="panel">
@@ -418,7 +464,11 @@ export default function App() {
           <div className="section-head">
             <h2>Achados {findings.length > 0 && <span className="count">{findings.length}</span>}</h2>
             <div className="actions">
-              <select value={filter} onChange={(e) => setFilter(e.target.value as typeof filter)}>
+              <select
+                aria-label="Filtrar achados por status"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value as typeof filter)}
+              >
                 <option value="all">Todos</option>
                 {Object.keys(STATUS_LABEL).map((status) => (
                   <option key={status} value={status}>
@@ -437,7 +487,17 @@ export default function App() {
               <article
                 key={finding.id}
                 className={`finding ${finding.id === selectedId ? "selected" : ""} sev-${finding.severity}`}
+                role="button"
+                tabIndex={0}
+                aria-label={`Achado ${finding.severity}: ${finding.title}`}
+                aria-pressed={finding.id === selectedId}
                 onClick={() => setSelectedId(finding.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setSelectedId(finding.id);
+                  }
+                }}
               >
                 <div className="finding-top">
                   <span className={`severity sev-${finding.severity}`}>{finding.severity}</span>
@@ -528,7 +588,7 @@ export default function App() {
           </div>
 
           <h2 className="mt">Eventos ao vivo</h2>
-          <div className="event-log">
+          <div className="event-log" aria-live="polite">
             {events.slice(-15).reverse().map((event, index) => (
               <div key={`${event}-${index}`}>{event}</div>
             ))}

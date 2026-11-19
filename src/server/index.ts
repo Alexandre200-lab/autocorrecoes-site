@@ -6,19 +6,21 @@ import fastifyCookie from "@fastify/cookie";
 import { createHash, randomBytes } from "node:crypto";
 import swagger from "@fastify/swagger";
 import swaggerUI from "@fastify/swagger-ui";
-import { config } from "../config/index.js";
+import { config, corsAllowedOrigins } from "../config/index.js";
 import { reauditFinding } from "../pipeline/index.js";
 import { applyApproved, rollbackRun } from "../patches/index.js";
 import { events } from "../shared/events.js";
-import { newId, store } from "../storage/index.js";
+import { closeDb, newId, store } from "../storage/index.js";
 import type { AuditOptions, Domain, Job, TargetType } from "../shared/types.js";
 import { logger } from "../observability/index.js";
 import { snapshot } from "../observability/metrics.js";
-import { startWorker, stopWorker } from "./worker.js";
+import { stopOtel } from "../observability/otel.js";
+import { assertSafeAuditRoot } from "../security/paths.js";
+import { startWorker, drainWorker } from "./worker.js";
 import { startScheduler, stopScheduler } from "./scheduler.js";
+
 import { diffRuns } from "../pipeline/diff.js";
 import { addBaselineFingerprints } from "../config/project.js";
-import { resolveLocalTarget } from "../auditors/url.js";
 
 const dashboardDir = resolve(process.cwd(), "dashboard/dist");
 
@@ -33,8 +35,30 @@ code{background:#161b22;padding:2px 6px;border-radius:4px;color:#79c0ff}a{color:
 <p>Endpoints: <code>/api/runs</code>, <code>/api/findings</code>, <code>/api/events</code></p>
 </body></html>`;
 
+function hash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+/** Converte parâmetros de query em limites seguros (negativos viravam LIMIT -1 = ilimitado). */
+function parseLimit(value: unknown, fallback: number, max: number): number {
+  const parsed = typeof value === "string" ? Number(value) : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
+}
+
 export async function startServer(port = config.PORT): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
+  // Fail-closed: produção sem token não pode expor /api/apply e /api/baseline.
+  if (config.NODE_ENV === "production" && !config.API_TOKEN && !config.ALLOW_INSECURE_NO_AUTH) {
+    throw new Error(
+      "API_TOKEN é obrigatório em produção. Defina API_TOKEN ou, apenas em desenvolvimento controlado, ALLOW_INSECURE_NO_AUTH=true.",
+    );
+  }
+
+  const app = Fastify({
+    logger: false,
+    bodyLimit: 2 * 1024 * 1024,
+    trustProxy: config.TRUST_PROXY,
+  });
 
   await app.register(swagger, {
     openapi: {
@@ -54,17 +78,19 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
   await app.register(fastifyCookie);
 
   const rateHits = new Map<string, { count: number; resetAt: number }>();
-  const sseTickets = new Map<string, number>();
+  const loginHits = new Map<string, { count: number; resetAt: number }>();
+  const sseTickets = new Map<string, { expires: number; identity: string }>();
   const SESSION_COOKIE = "autocorrecoes_session";
   const SESSION_MAX_AGE = 8 * 60 * 60;
-  const SSE_TICKET_TTL = 5 * 60 * 1000;
   const cleanupTimer = setInterval(() => {
     const now = Date.now();
-    for (const [key, expires] of sseTickets) {
-      if (expires < now) sseTickets.delete(key);
+    for (const [key, entry] of sseTickets) {
+      if (entry.expires < now) sseTickets.delete(key);
     }
-    for (const [key, entry] of rateHits) {
-      if (entry.resetAt < now) rateHits.delete(key);
+    for (const map of [rateHits, loginHits]) {
+      for (const [key, entry] of map) {
+        if (entry.resetAt < now) map.delete(key);
+      }
     }
   }, 60_000);
   cleanupTimer.unref?.();
@@ -75,10 +101,36 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     "/api/auth/logout",
     "/api/events/ticket",
   ]);
+
+  function consume(
+    map: Map<string, { count: number; resetAt: number }>,
+    key: string,
+    max: number,
+  ): { limited: boolean; retryAfter: number } {
+    if (max <= 0) return { limited: false, retryAfter: 0 };
+    const now = Date.now();
+    let entry = map.get(key);
+    if (!entry || now > entry.resetAt) {
+      entry = { count: 0, resetAt: now + 60_000 };
+      map.set(key, entry);
+    }
+    entry.count += 1;
+    return {
+      limited: entry.count > max,
+      retryAfter: Math.ceil((entry.resetAt - now) / 1000),
+    };
+  }
+
   app.addHook("onRequest", async (request, reply) => {
-    reply.header("Access-Control-Allow-Origin", "*");
-    reply.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    const origin = request.headers.origin;
+    const allowedOrigins = corsAllowedOrigins();
+    if (allowedOrigins.length > 0) reply.header("Vary", "Origin");
+    if (origin && allowedOrigins.includes(origin)) {
+      reply.header("Access-Control-Allow-Origin", origin);
+      reply.header("Access-Control-Allow-Credentials", "true");
+      reply.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+      reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    }
 
     const path = request.url.split("?")[0];
     const isPublicDocs = path.startsWith("/docs") || path.startsWith("/openapi");
@@ -89,41 +141,53 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     const bearer = request.headers.authorization?.startsWith("Bearer ")
       ? request.headers.authorization.slice(7)
       : undefined;
-    const queryAuth = request.query as { token?: string; ticket?: string } | undefined;
-    const identity = cookies[SESSION_COOKIE] ?? bearer ?? queryAuth?.token ?? request.ip;
-    const rateKey = createHash("sha256").update(identity).digest("hex").slice(0, 16);
+    const queryAuth = request.query as { ticket?: string } | undefined;
 
-    if (config.RATE_LIMIT_MAX > 0 && isApi && !isPublic) {
-      const key = rateKey;
-      const now = Date.now();
-      let entry = rateHits.get(key);
-      if (!entry || now > entry.resetAt) {
-        entry = { count: 0, resetAt: now + 60_000 };
-        rateHits.set(key, entry);
-      }
-      entry.count += 1;
-      if (entry.count > config.RATE_LIMIT_MAX) {
+    // A identidade do limitador é sempre autenticada ou o IP — nunca um
+    // parâmetro de query não validado (bypass via ?token= aleatório).
+    const authenticated =
+      Boolean(config.API_TOKEN) &&
+      (cookies[SESSION_COOKIE] === config.API_TOKEN || bearer === config.API_TOKEN);
+    const identityKey = authenticated
+      ? `auth:${hash(config.API_TOKEN ?? "")}`
+      : `ip:${hash(request.ip)}`;
+
+    if (path === "/api/auth/login" && config.LOGIN_RATE_LIMIT_MAX > 0) {
+      const result = consume(loginHits, `login:${hash(request.ip)}`, config.LOGIN_RATE_LIMIT_MAX);
+      if (result.limited) {
         return reply
           .code(429)
-          .header("Retry-After", String(Math.ceil((entry.resetAt - now) / 1000)))
+          .header("Retry-After", String(result.retryAfter))
+          .send({ error: "Muitas tentativas de login. Tente novamente em instantes." });
+      }
+    }
+
+    if (config.RATE_LIMIT_MAX > 0 && isApi && !isPublic) {
+      const result = consume(rateHits, identityKey, config.RATE_LIMIT_MAX);
+      if (result.limited) {
+        return reply
+          .code(429)
+          .header("Retry-After", String(result.retryAfter))
           .send({ error: "Muitas requisições. Tente novamente em instantes." });
       }
     }
 
     if (!config.API_TOKEN || !isApi || isPublic) return;
 
-    // SSE usa ticket de curta duração em vez do token de sessão na URL.
+    // SSE usa ticket de curta duração vinculado ao IP, em vez do token na URL.
     if (path === "/api/events" && queryAuth?.ticket) {
-      const expires = sseTickets.get(queryAuth.ticket);
-      if (expires && expires > Date.now()) return;
-      reply.code(401);
-      return reply.send({ error: "Ticket de eventos inválido ou expirado." });
+      const entry = sseTickets.get(queryAuth.ticket);
+      const ticketIdentity = `ip:${hash(request.ip)}`;
+      if (!entry || entry.expires <= Date.now() || entry.identity !== ticketIdentity) {
+        return reply.code(401).send({ error: "Ticket de eventos inválido ou expirado." });
+      }
+      return;
     }
 
-    // Cookie httpOnly é a forma preferida; Bearer mantém compatibilidade com CLI/CI.
-    if (cookies[SESSION_COOKIE] !== config.API_TOKEN && bearer !== config.API_TOKEN) {
-      reply.code(401);
-      return reply.send({ error: "Não autorizado. Faça login ou informe Bearer <API_TOKEN>." });
+    if (!authenticated) {
+      return reply
+        .code(401)
+        .send({ error: "Não autorizado. Faça login ou informe Bearer <API_TOKEN>." });
     }
   });
   app.options("/*", async (_request, reply) => reply.code(204).send());
@@ -145,8 +209,10 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
       if (!config.API_TOKEN || token !== config.API_TOKEN) {
         return reply.code(401).send({ error: "Token inválido." });
       }
-      const secure =
-        request.headers["x-forwarded-proto"] === "https" || request.protocol === "https";
+      // X-Forwarded-Proto só é confiável quando TRUST_PROXY está habilitado.
+      const forwardedHttps =
+        config.TRUST_PROXY && request.headers["x-forwarded-proto"] === "https";
+      const secure = forwardedHttps || request.protocol === "https";
       reply.setCookie(SESSION_COOKIE, config.API_TOKEN, {
         httpOnly: true,
         sameSite: "strict",
@@ -171,12 +237,18 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     if (config.API_TOKEN && cookies[SESSION_COOKIE] !== config.API_TOKEN && bearer !== config.API_TOKEN) {
       return reply.code(401).send({ error: "Não autorizado." });
     }
-    for (const [key, expires] of sseTickets) {
-      if (expires < Date.now()) sseTickets.delete(key);
+    for (const [key, entry] of sseTickets) {
+      if (entry.expires < Date.now()) sseTickets.delete(key);
     }
     const ticket = randomBytes(24).toString("base64url");
-    sseTickets.set(ticket, Date.now() + SSE_TICKET_TTL);
-    return { ticket, expiresIn: Math.round(SSE_TICKET_TTL / 1000) };
+    sseTickets.set(ticket, {
+      expires: Date.now() + config.SSE_TICKET_TTL_MS,
+      identity: `ip:${hash(request.ip)}`,
+    });
+    return {
+      ticket,
+      expiresIn: Math.round(config.SSE_TICKET_TTL_MS / 1000),
+    };
   });
 
   app.get("/api/health", async () => ({ ok: true, version: "1.0.0" }));
@@ -186,19 +258,18 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     verifyModel: config.DEEPSEEK_VERIFY_MODEL,
     apiKeyConfigured: config.apiKeyConfigured,
     authRequired: Boolean(config.API_TOKEN),
-    dataDir: config.dataDir,
   }));
 
   app.get("/api/runs", async (request) => {
     const query = request.query as { limit?: string };
-    return { runs: store.listRuns(Math.min(Number(query.limit) || 50, 200)) };
+    return { runs: store.listRuns(parseLimit(query.limit, 50, 200)) };
   });
 
   app.get("/api/jobs", async (request) => {
     const query = request.query as { limit?: string; dead?: string };
     return {
       jobs: store.listJobs(
-        Math.min(Number(query.limit) || 50, 200),
+        parseLimit(query.limit, 50, 200),
         query.dead === "true" ? true : query.dead === "false" ? false : undefined,
       ),
     };
@@ -240,22 +311,18 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
   app.get("/api/trends", async (request) => {
     const query = request.query as { limit?: string };
     const runs = store
-      .listRuns(Math.min(Number(query.limit) || 20, 100))
+      .listRuns(parseLimit(query.limit, 20, 100))
       .slice()
       .reverse();
+    const counts = store.countFindingsByRunAndSeverity();
     return {
-      trends: runs.map((run) => {
-        const findings = store.listFindings({ runId: run.id, limit: 500 });
-        const bySeverity = { P1: 0, P2: 0, P3: 0, P4: 0 };
-        for (const finding of findings) bySeverity[finding.severity] += 1;
-        return {
-          id: run.id,
-          startedAt: run.startedAt,
-          target: run.target,
-          signals: run.signals.length,
-          bySeverity,
-        };
-      }),
+      trends: runs.map((run) => ({
+        id: run.id,
+        startedAt: run.startedAt,
+        target: run.target,
+        signals: run.signals.length,
+        bySeverity: counts.get(run.id) ?? { P1: 0, P2: 0, P3: 0, P4: 0 },
+      })),
     };
   });
 
@@ -275,7 +342,14 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     const body = request.body as { runId: string; fingerprints?: string[] };
     const run = store.getRun(body.runId);
     if (!run) return reply.code(404).send({ error: "Execução não encontrada." });
-    const root = run.targetType === "path" ? resolveLocalTarget(run.target) : process.cwd();
+    let root: string;
+    try {
+      root = run.targetType === "path" ? assertSafeAuditRoot(run.target) : process.cwd();
+    } catch (error) {
+      return reply
+        .code(400)
+        .send({ error: error instanceof Error ? error.message : String(error) });
+    }
     return addBaselineFingerprints(root, body.fingerprints ?? []);
   });
 
@@ -285,7 +359,7 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
       findings: store.listFindings({
         runId: query.runId,
         status: query.status as never,
-        limit: Math.min(Number(query.limit) || 200, 500),
+        limit: parseLimit(query.limit, 200, 500),
       }),
     };
   });
@@ -336,6 +410,15 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
     };
     if (!body.target || typeof body.target !== "string") {
       return reply.code(400).send({ error: "Campo 'target' é obrigatório." });
+    }
+    if (body.type === "path") {
+      try {
+        assertSafeAuditRoot(body.target);
+      } catch (error) {
+        return reply
+          .code(400)
+          .send({ error: error instanceof Error ? error.message : String(error) });
+      }
     }
     const options: AuditOptions = {
       type: body.type,
@@ -447,13 +530,18 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
       (event) => {
         reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
       },
-      { runId: query.runId, afterId: query.afterId ? Number(query.afterId) : undefined },
+      { runId: query.runId, afterId: parseLimit(query.afterId, 0, Number.MAX_SAFE_INTEGER) || undefined },
     );
     const heartbeat = setInterval(() => reply.raw.write(": ping\n\n"), 20_000);
-    request.raw.on("close", () => {
+    let closed = false;
+    const cleanup = (): void => {
+      if (closed) return;
+      closed = true;
       clearInterval(heartbeat);
       unsubscribe();
-    });
+    };
+    request.raw.on("close", cleanup);
+    request.raw.on("error", cleanup);
   });
 
   if (existsSync(resolve(dashboardDir, "index.html"))) {
@@ -465,8 +553,10 @@ export async function startServer(port = config.PORT): Promise<FastifyInstance> 
 
   app.addHook("onClose", async () => {
     clearInterval(cleanupTimer);
-    stopWorker();
     stopScheduler();
+    await drainWorker();
+    closeDb();
+    await stopOtel();
   });
   startWorker();
   startScheduler();

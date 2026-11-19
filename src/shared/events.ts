@@ -9,6 +9,12 @@ export interface EventFilter {
 }
 
 class TypedEmitter extends EventEmitter {
+  constructor() {
+    super();
+    // Cada cliente SSE registra um listener; o padrão 10 gera avisos em produção.
+    this.setMaxListeners(0);
+  }
+
   emitEvent(event: PipelineEvent): DeliveredEvent {
     const stored = store.insertEvent({
       runId: "runId" in event ? event.runId : undefined,

@@ -3,22 +3,26 @@ import postcss from "postcss";
 
 /** Detecção semântica de "correções" que apenas escondem o problema. */
 
+type AstNode = { type?: string; [key: string]: unknown };
+
 function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-function staticString(node: any): string | null {
-  if (!node) return null;
-  if (node.type === "StringLiteral") return String(node.value);
-  if (node.type === "TemplateLiteral" && node.expressions?.length === 0) {
-    return node.quasis?.[0]?.value?.cooked ?? null;
+function staticString(node: unknown): string | null {
+  if (!node || typeof node !== "object") return null;
+  const value = node as AstNode;
+  if (value.type === "StringLiteral") return String(value.value);
+  if (value.type === "TemplateLiteral" && !value.expressions) {
+    const quasis = value.quasis as Array<{ value?: { cooked?: string } }> | undefined;
+    return quasis?.[0]?.value?.cooked ?? null;
   }
   return null;
 }
 
-function walk(node: unknown, visit: (node: any) => void): void {
+function walk(node: unknown, visit: (node: AstNode) => void): void {
   if (!node || typeof node !== "object") return;
-  const value = node as Record<string, unknown>;
+  const value = node as AstNode;
   if (typeof value.type === "string") visit(value);
   for (const key of Object.keys(value)) {
     if (key === "loc" || key === "start" || key === "end" || key === "extra") continue;
@@ -29,6 +33,18 @@ function walk(node: unknown, visit: (node: any) => void): void {
       walk(child, visit);
     }
   }
+}
+
+function propertyName(node: AstNode): string | undefined {
+  const left = node.left as AstNode | undefined;
+  if (left?.property && typeof left.property === "object") {
+    const property = left.property as AstNode;
+    if (typeof property.name === "string") return property.name;
+  }
+  if (typeof left?.name === "string") return left.name;
+  const key = node.key as AstNode | undefined;
+  if (typeof key?.name === "string") return key.name;
+  return staticString(key) ?? undefined;
 }
 
 export function detectCssSuppression(content: string): string[] {
@@ -52,7 +68,7 @@ export function detectCssSuppression(content: string): string[] {
       reasons.push("CSS opacity:0 esconde o elemento (AST)");
     }
     if (property === "pointer-events" && /\bnone\b/.test(value)) {
-      reasons.push("CSS pointer-events:none desativa a interação (AST)");
+      reasons.push("CSS pointer-events:none desativa o elemento (AST)");
     }
   });
   return unique(reasons);
@@ -73,19 +89,17 @@ export function detectJsSuppression(content: string): string[] {
 
   walk(ast, (node) => {
     if (node.type === "CallExpression") {
-      const callee = node.callee;
+      const callee = node.callee as AstNode | undefined;
       const name =
         callee?.type === "Identifier"
-          ? callee.name
-          : callee?.property?.type === "Identifier"
-            ? callee.property.name
+          ? (callee.name as string)
+          : callee?.property && typeof callee.property === "object"
+            ? ((callee.property as AstNode).name as string)
             : undefined;
-      const argument = staticString(node.arguments?.[0]);
+      const args = node.arguments as unknown[] | undefined;
+      const argument = staticString(args?.[0]);
 
-      if (
-        name === "setAttribute" &&
-        ["aria-hidden", "hidden", "inert"].includes(argument ?? "")
-      ) {
+      if (name === "setAttribute" && ["aria-hidden", "hidden", "inert"].includes(argument ?? "")) {
         reasons.push(`${argument} aplicado via setAttribute (AST)`);
       }
       if (name === "disableRules" || name === "disableRule") {
@@ -97,12 +111,10 @@ export function detectJsSuppression(content: string): string[] {
     }
 
     if (node.type === "AssignmentExpression" || node.type === "ObjectProperty") {
-      const key =
-        node.left?.property?.name ??
-        node.left?.name ??
-        node.key?.name ??
-        staticString(node.key);
-      const value = node.right?.value ?? node.value?.value;
+      const key = propertyName(node);
+      const right = node.right as AstNode | undefined;
+      const valueNode = (right ?? node.value) as AstNode | undefined;
+      const value = valueNode?.value;
       if (["ariaHidden", "hidden", "inert"].includes(String(key)) && value === true) {
         reasons.push(`${String(key)} definido como true (AST)`);
       }
@@ -112,6 +124,15 @@ export function detectJsSuppression(content: string): string[] {
 }
 
 export function detectSuppressionAst(content: string, format?: string): string[] {
-  const isCss = format === "css-rule" || /\.css$/i.test(format ?? "");
-  return isCss ? detectCssSuppression(content) : detectJsSuppression(content);
+  const looksCss =
+    format === "css-rule" ||
+    /\.css$/i.test(format ?? "") ||
+    /[.#@]?[\w-]+\s*\{[^}]*:/.test(content);
+  const reasons = looksCss ? detectCssSuppression(content) : detectJsSuppression(content);
+  // Patches unified-diff/full-file podem conter CSS; executar ambos os parsers
+  // evita o falso negativo que existia quando apenas o formato era considerado.
+  if (format === "unified-diff" || format === "full-file") {
+    return unique([...reasons, ...detectCssSuppression(content)]);
+  }
+  return reasons;
 }

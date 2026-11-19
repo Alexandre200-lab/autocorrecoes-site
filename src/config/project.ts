@@ -59,11 +59,15 @@ export function loadProjectConfig(root: string): ProjectConfig {
 }
 
 /** Mescla fingerprints no baseline do .autocorrecoes.yml do alvo. */
-export function addBaselineFingerprints(root: string, fingerprints: string[]): {
+export function addBaselineFingerprints(
+  root: string,
+  fingerprints: string[],
+  explicitFile?: string,
+): {
   file: string;
   total: number;
 } {
-  const file = findProjectConfigFile(root) ?? resolve(root, ".autocorrecoes.yml");
+  const file = explicitFile ?? findProjectConfigFile(root) ?? resolve(root, ".autocorrecoes.yml");
   const existing = existsSync(file)
     ? (YAML.parse(readFileSync(file, "utf8")) as Record<string, unknown>)
     : {};
@@ -72,6 +76,20 @@ export function addBaselineFingerprints(root: string, fingerprints: string[]): {
   existing.baseline = { ...baseline, fingerprints: merged };
   writeFileSync(file, YAML.stringify(existing), "utf8");
   return { file, total: merged.length };
+}
+
+/** Lê as fingerprints atuais de um arquivo de configuração arbitrário. */
+export function readBaselineFingerprints(file: string): string[] {
+  if (!existsSync(file)) return [];
+  try {
+    const parsed = YAML.parse(readFileSync(file, "utf8")) as
+      | { baseline?: { fingerprints?: string[] } }
+      | null;
+    const values = parsed?.baseline?.fingerprints;
+    return Array.isArray(values) ? values.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 export function resolveStorageState(

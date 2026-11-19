@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
+import type { AddressInfo } from "node:net";
 import test from "node:test";
 
 test("API exige Bearer token quando API_TOKEN está configurado", async () => {
   process.env.API_TOKEN = "token-de-teste-123456";
   const { startServer } = await import("../src/server/index.js");
-  const port = 14311;
+  const app = await startServer(0);
+  const port = (app.server.address() as AddressInfo).port;
   const base = `http://127.0.0.1:${port}`;
-  const app = await startServer(port);
 
   try {
     const withoutToken = await fetch(`${base}/api/runs`);

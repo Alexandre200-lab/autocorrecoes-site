@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { AddressInfo } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,9 +14,9 @@ test("API enfileira auditoria e worker a conclui com runId", async () => {
   process.env.API_TOKEN = "";
 
   const { startServer } = await import("../src/server/index.js");
-  const port = 14312;
+  const app = await startServer(0);
+  const port = (app.server.address() as AddressInfo).port;
   const base = `http://127.0.0.1:${port}`;
-  const app = await startServer(port);
 
   try {
     const response = await fetch(`${base}/api/audit`, {

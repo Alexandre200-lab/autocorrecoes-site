@@ -54,20 +54,24 @@ function findLocation(
   hunk: Hunk,
   from: number,
 ): number {
-  const exact = hunk.oldBlock.join("\n");
-  const removed = hunk.removedBlock.join("\n");
   const hint = hunk.oldStart;
-  const window = Math.max(50, source.length);
+  const window = source.length;
+
+  // Comparação linha a linha evita reconstruir strings O(n) a cada offset.
+  const matches = (at: number, block: string[]): boolean => {
+    if (at < 0 || at + block.length > source.length) return false;
+    for (let i = 0; i < block.length; i += 1) {
+      if (source[at + i] !== block[i]) return false;
+    }
+    return true;
+  };
 
   const search = (block: string[]): number => {
-    const needle = block.join("\n");
-    if (!needle) return -1;
+    if (block.length === 0) return -1;
     for (let offset = 0; offset <= window; offset += 1) {
       for (const candidate of offset === 0 ? [hint] : [hint + offset, hint - offset]) {
         if (candidate < from || candidate < 0) continue;
-        if (source.slice(candidate, candidate + block.length).join("\n") === needle) {
-          return candidate;
-        }
+        if (matches(candidate, block)) return candidate;
       }
     }
     return -1;
@@ -78,8 +82,6 @@ function findLocation(
   if (exactIndex >= 0) return exactIndex;
   const removedIndex = search(hunk.removedBlock);
   if (removedIndex >= 0) return removedIndex;
-  void exact;
-  void removed;
 
   // Último recurso: primeira linha removida isolada.
   const first = hunk.removedBlock[0];

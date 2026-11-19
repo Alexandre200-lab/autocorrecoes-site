@@ -38,13 +38,29 @@ const BLOCKED_V4: Array<[string, number]> = [
   ["240.0.0.0", 4],
 ];
 
+/** Faixas IPv6 especiais que podem tunelar para IPv4 interno. */
+function isBlockedIpv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  if (lower === "::" || lower === "::1") return true;
+  if (lower.startsWith("::ffff:")) return isBlockedIp(lower.slice(7));
+  if (/^f[cd]/.test(lower)) return true; // fc00::/7 (ULA)
+  if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 (link-local)
+  if (/^fec[0-9a-f]/.test(lower)) return true; // fec0::/10 (site-local)
+  if (/^ff/.test(lower)) return true; // ff00::/8 (multicast)
+  if (/^2002:/.test(lower)) return true; // 2002::/16 (6to4)
+  if (lower.startsWith("64:ff9b:")) return true; // 64:ff9b::/96 (NAT64)
+  if (/^2001:0:/.test(lower)) return true; // 2001::/32 (Teredo)
+  return false;
+}
+
 export function isBlockedIp(ip: string): boolean {
   const clean = ip.replace(/^\[|\]$/g, "");
-  if (clean.startsWith("::ffff:")) return isBlockedIp(clean.slice(7));
-  if (clean === "::" || clean === "::1") return true;
   const lower = clean.toLowerCase();
-  if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // fc00::/7
-  if (/^fe[89ab]/.test(lower)) return true; // fe80::/10
+  if (lower.startsWith("::ffff:")) return isBlockedIp(lower.slice(7));
+  if (isBlockedIpv6(lower)) return true;
+  // Política conservadora desta versão: todo IPv6 é bloqueado. A rotina acima
+  // documenta as faixas especiais (6to4, NAT64, Teredo) que jamais devem ser
+  // liberadas se esse quadro for alterado.
   if (isIP(clean) !== 4) return isIP(clean) === 6;
   return BLOCKED_V4.some(([base, bits]) => inRange(clean, base, bits));
 }

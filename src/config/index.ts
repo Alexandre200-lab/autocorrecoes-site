@@ -1,13 +1,20 @@
 import dotenv from "dotenv";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
-dotenv.config({ path: `${process.cwd()}/.env` });
+// Procura .env no cwd e, em seguida, na raiz do pacote (o binário pode ser
+// invocado de qualquer diretório).
+const cwdEnv = `${process.cwd()}/.env`;
+const packageEnv = fileURLToPath(new URL("../../.env", import.meta.url));
+dotenv.config({ path: existsSync(cwdEnv) ? cwdEnv : packageEnv });
 
 const boolString = z
   .enum(["true", "false", "1", "0", "yes", "no", ""])
   .transform((value) => value === "true" || value === "1" || value === "yes");
 
 const EnvSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   DEEPSEEK_API_KEY: z.string().trim().optional(),
   /** Token de acesso à API/dashboard. Vazio = modo desenvolvimento sem auth. */
   API_TOKEN: z.string().trim().optional(),
@@ -26,6 +33,20 @@ const EnvSchema = z.object({
   AUDIT_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   /** Requisições por minuto por cliente na API (0 desliga). */
   RATE_LIMIT_MAX: z.coerce.number().int().min(0).default(120),
+  /** Tentativas de login por minuto por IP (0 desliga). */
+  LOGIN_RATE_LIMIT_MAX: z.coerce.number().int().min(0).default(5),
+  /** Origens permitidas no CORS (separadas por vírgula). Vazio = sem CORS (same-origin). */
+  CORS_ORIGIN: z.string().trim().default(""),
+  /** TTL do ticket SSE, em milissegundos. */
+  SSE_TICKET_TTL_MS: z.coerce.number().int().positive().default(120_000),
+  /** Diretórios permitidos como alvo de auditoria local (separados por vírgula). */
+  AUDIT_ALLOWED_ROOTS: z.string().trim().default(""),
+  /** Executa scripts npm do repositório auditado. Desligado = seguro por padrão. */
+  AUDIT_ALLOW_NPM_SCRIPTS: boolString.default(false),
+  /** Escapa do fail-closed de API_TOKEN em produção (apenas para desenvolvimento controlado). */
+  ALLOW_INSECURE_NO_AUTH: boolString.default(false),
+  /** Confia em X-Forwarded-Proto apenas quando atrás de proxy conhecido. */
+  TRUST_PROXY: boolString.default(false),
   PLAYWRIGHT_HEADLESS: boolString.default(true),
   PLAYWRIGHT_VIEWPORT: z.string().default("1440x900"),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().trim().default(""),
@@ -48,7 +69,7 @@ export function createConfig(source: NodeJS.ProcessEnv = process.env): Config {
   const env = parsed.data;
   // Cada arquivo de teste roda em um processo filho; isolamos o SQLite por PID
   // para evitar "database is locked" quando o runner executa em paralelo.
-  const isTest = Boolean(source.NODE_TEST_CONTEXT || source.NODE_ENV === "test");
+  const isTest = Boolean(source.NODE_TEST_CONTEXT || env.NODE_ENV === "test");
   return {
     ...env,
     dataDir: isTest
@@ -74,4 +95,18 @@ export function requireApiKey(cfg: Config = config): string {
 export function viewport(cfg: Config = config): { width: number; height: number } {
   const [w, h] = cfg.PLAYWRIGHT_VIEWPORT.split("x").map(Number);
   return { width: w || 1440, height: h || 900 };
+}
+
+/** Lista de origens CORS configuradas (separadas por vírgula). */
+export function corsAllowedOrigins(cfg: Config = config): string[] {
+  return cfg.CORS_ORIGIN.split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+/** Lista de raízes locais permitidas como alvo de auditoria. */
+export function allowedAuditRoots(cfg: Config = config): string[] {
+  return cfg.AUDIT_ALLOWED_ROOTS.split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
 }

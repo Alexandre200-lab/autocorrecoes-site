@@ -1,19 +1,23 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import YAML from "yaml";
+import { existsSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { Command } from "commander";
 import { config } from "../config/index.js";
+import { addBaselineFingerprints, readBaselineFingerprints } from "../config/project.js";
+import { logger } from "../observability/index.js";
 import { reauditFinding, runAudit } from "../pipeline/index.js";
 import { applyApproved, rollbackRun } from "../patches/index.js";
 import { newId, store } from "../storage/index.js";
 import { toSarif } from "../report/sarif.js";
 import { fingerprint } from "../pipeline/fingerprint.js";
 import { diffRuns } from "../pipeline/diff.js";
-import { startOtel } from "../observability/otel.js";
+import { startOtel, stopOtel } from "../observability/otel.js";
 import type { Domain, Finding, TargetType } from "../shared/types.js";
 
 const program = new Command();
+
+/** Referência ao servidor ativo para desligamento gracioso. */
+let runningApp: { close: () => Promise<unknown> } | null = null;
 
 const SEVERITY_LABEL: Record<string, string> = {
   P1: "CRÍTICO",
@@ -245,17 +249,15 @@ program
       return;
     }
     const file = resolve(process.cwd(), opts.file);
-    const existing = (existsSync(file)
-      ? (YAML.parse(readFileSync(file, "utf8")) as Record<string, unknown>)
-      : {}) as {
-      baseline?: { fingerprints?: string[] };
-      [key: string]: unknown;
-    };
-    const current = existing.baseline?.fingerprints ?? [];
-    const merged = [...new Set([...current, ...run.signals.map(fingerprint)])];
-    existing.baseline = { ...(existing.baseline ?? {}), fingerprints: merged };
-    writeFileSync(file, YAML.stringify(existing), "utf8");
-    console.log(`${merged.length - current.length} nova(s) fingerprint(s) em ${file} (total: ${merged.length}).`);
+    const before = readBaselineFingerprints(file);
+    const result = addBaselineFingerprints(
+      dirname(file),
+      run.signals.map(fingerprint),
+      file,
+    );
+    console.log(
+      `${result.total - before.length} nova(s) fingerprint(s) em ${result.file} (total: ${result.total}).`,
+    );
   });
 
 program
@@ -358,7 +360,7 @@ program
   .option("--port <porta>", "porta do servidor")
   .action(async (opts) => {
     const { startServer } = await import("../server/index.js");
-    await startServer(opts.port ? Number(opts.port) : config.PORT);
+    runningApp = await startServer(opts.port ? Number(opts.port) : config.PORT);
   });
 
 program
@@ -382,6 +384,19 @@ program
       "Dica: npx playwright install chromium  ·  cp .env.example .env  ·  npm run cli -- audit <alvo>",
     );
   });
+
+async function shutdown(signal: string): Promise<void> {
+  logger.info("process.shutdown", { signal });
+  try {
+    if (runningApp) await runningApp.close();
+    await stopOtel();
+  } finally {
+    process.exit(0);
+  }
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
 startOtel();
 program.parseAsync(process.argv).catch((error: unknown) => {

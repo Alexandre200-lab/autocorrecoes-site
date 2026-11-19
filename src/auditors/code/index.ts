@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { config } from "../../config/index.js";
 import { isIgnored } from "../../config/project.js";
 import { redactSecrets } from "../../security/redact.js";
 import type { AuditOptions, RawSignal } from "../../shared/types.js";
@@ -35,6 +36,13 @@ function runCommand(command: string, args: string[], cwd: string, timeout = 90_0
       timeout,
       maxBuffer: 10 * 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
+      // Nunca repasse segredos do processo ao código executado do repositório auditado.
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        LANG: process.env.LANG ?? "C.UTF-8",
+        NODE_ENV: "audit",
+      },
     });
     return { ok: true, output: String(output).trim(), ran: true };
   } catch (error) {
@@ -65,8 +73,25 @@ function listFiles(root: string, folder = "", files: string[] = [], depth = 0): 
   return files;
 }
 
-function lineOf(content: string, index: number): number {
-  return content.slice(0, index).split("\n").length;
+function lineStarts(content: string): number[] {
+  const starts: number[] = [];
+  let offset = 0;
+  for (const line of content.split("\n")) {
+    starts.push(offset);
+    offset += line.length + 1;
+  }
+  return starts;
+}
+
+function lineOf(starts: number[], index: number): number {
+  let low = 0;
+  let high = starts.length - 1;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if ((starts[mid] ?? 0) <= index) low = mid;
+    else high = mid - 1;
+  }
+  return low + 1;
 }
 
 const PATTERNS: Array<{
@@ -168,26 +193,43 @@ export class CodeAuditor implements Auditor {
       }
     }
 
-    for (const script of ["typecheck", "lint", "test"] as const) {
-      if (!pkg.scripts?.[script]) {
-        checksNotRun.push(`npm run ${script} (script ausente)`);
-        continue;
+    if (!config.AUDIT_ALLOW_NPM_SCRIPTS) {
+      checksNotRun.push(
+        "npm run typecheck/lint/test (scripts do alvo bloqueados; habilite AUDIT_ALLOW_NPM_SCRIPTS)",
+      );
+      signals.push({
+        domain: "code",
+        ruleId: "UNTRUSTED_SCRIPTS_SKIPPED",
+        title: "Scripts npm do repositório não executados",
+        message:
+          "Executar scripts de um repositório não confiável equivale a executar código arbitrário. Habilite AUDIT_ALLOW_NPM_SCRIPTS apenas para repositórios confiáveis.",
+        severity: "P4",
+        path: "package.json",
+        evidence: `scripts disponíveis: ${Object.keys(pkg.scripts ?? {}).join(", ") || "nenhum"}`,
+        metadata: { requiresHuman: true, config: "AUDIT_ALLOW_NPM_SCRIPTS" },
+      });
+    } else {
+      for (const script of ["typecheck", "lint", "test"] as const) {
+        if (!pkg.scripts?.[script]) {
+          checksNotRun.push(`npm run ${script} (script ausente)`);
+          continue;
+        }
+        const result = runCommand("npm", ["run", script, "--silent"], root, 120_000);
+        checksRun.push(`npm run ${script}`);
+        if (!result.ok) {
+          signals.push({
+            domain: "code",
+            ruleId: `CHECK_FAILED_${script.toUpperCase()}`,
+            title: `Falha no check: npm run ${script}`,
+            message: `Comando npm run ${script} terminou com falha.`,
+            severity: script === "test" ? "P1" : "P2",
+            path: "package.json",
+            evidence: redactSecrets(result.output.split("\n").slice(0, 40).join("\n").slice(0, 4000)),
+            metadata: { command: `npm run ${script}` },
+          });
+        }
+        contextLines.push(`npm run ${script}: ${result.ok ? "PASS" : "FAIL"}`);
       }
-      const result = runCommand("npm", ["run", script, "--silent"], root, 120_000);
-      checksRun.push(`npm run ${script}`);
-      if (!result.ok) {
-        signals.push({
-          domain: "code",
-          ruleId: `CHECK_FAILED_${script.toUpperCase()}`,
-          title: `Falha no check: npm run ${script}`,
-          message: `Comando npm run ${script} terminou com falha.`,
-          severity: script === "test" ? "P1" : "P2",
-          path: "package.json",
-          evidence: redactSecrets(result.output.split("\n").slice(0, 40).join("\n").slice(0, 4000)),
-          metadata: { command: `npm run ${script}` },
-        });
-      }
-      contextLines.push(`npm run ${script}: ${result.ok ? "PASS" : "FAIL"}`);
     }
 
     const audit = runCommand(
@@ -230,7 +272,21 @@ export class CodeAuditor implements Auditor {
     }
 
     const ignore = options.project?.ignore ?? [];
-    const files = listFiles(root).filter((file) => !isIgnored(file, ignore));
+    const scanned = listFiles(root);
+    if (scanned.length >= 400) {
+      signals.push({
+        domain: "code",
+        ruleId: "SOURCE_SCAN_TRUNCATED",
+        title: "Varredura estática truncada",
+        message: "O repositório excede o limite de 400 arquivos; a auditoria não foi completa.",
+        severity: "P3",
+        path: root,
+        evidence: `arquivos varridos: ${scanned.length} (limite: 400)`,
+        metadata: { requiresHuman: true, truncated: true },
+      });
+      checksNotRun.push("varredura estática completa (limite de 400 arquivos atingido)");
+    }
+    const files = scanned.filter((file) => !isIgnored(file, ignore));
     checksRun.push(`varredura estática (${files.length} arquivos)`);
     let snippets = "";
     for (const file of files) {
@@ -240,13 +296,15 @@ export class CodeAuditor implements Auditor {
       } catch {
         continue;
       }
+      const starts = lineStarts(content);
+      const sourceLines = content.split("\n");
       for (const pattern of PATTERNS) {
         let match: RegExpExecArray | null;
         const re = new RegExp(pattern.re.source, pattern.re.flags);
         let count = 0;
         while ((match = re.exec(content)) !== null && count < pattern.limit) {
-          const line = lineOf(content, match.index);
-          const sample = content.split("\n")[line - 1]?.trim().slice(0, 200) ?? "";
+          const line = lineOf(starts, match.index);
+          const sample = sourceLines[line - 1]?.trim().slice(0, 200) ?? "";
           signals.push({
             domain: "code",
             ruleId: pattern.ruleId,

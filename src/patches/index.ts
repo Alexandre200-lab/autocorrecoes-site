@@ -102,6 +102,27 @@ function renderContent(patch: Patch, original: string): string {
   }
 }
 
+/**
+ * Verifica a promessa de "não alteração" feita pelo Proposer. Se um trecho
+ * declarado como preservado existia no original e desapareceu após o patch,
+ * a aplicação é abortada e revertida.
+ */
+export function assertUntouched(
+  patch: Patch,
+  originals: Map<string, string>,
+  updated: Map<string, string>,
+): void {
+  const before = [...originals.values()].join("\n");
+  const after = [...updated.values()].join("\n");
+  for (const raw of patch.untouchedAssertion ?? []) {
+    const token = raw.trim();
+    if (!token || !before.includes(token)) continue;
+    if (!after.includes(token)) {
+      throw new Error(`Declaração de não-alteração violada: "${token}" desapareceu do patch.`);
+    }
+  }
+}
+
 function localChecks(root: string): { ok: boolean; output: string[] } {
   const output: string[] = [];
   let ok = true;
@@ -129,7 +150,15 @@ function localChecks(root: string): { ok: boolean; output: string[] } {
   } catch {
     // Repositório sem package.json: apenas git diff --check.
   }
-  const script = pkg.scripts?.typecheck ? "typecheck" : pkg.scripts?.["check"] ? "check" : null;
+  // Segurança: scripts do repositório auditado são código arbitrário. Só são
+  // executados com opt-in explícito (AUDIT_ALLOW_NPM_SCRIPTS=true).
+  const script = config.AUDIT_ALLOW_NPM_SCRIPTS
+    ? pkg.scripts?.typecheck
+      ? "typecheck"
+      : pkg.scripts?.["check"]
+        ? "check"
+        : null
+    : null;
   if (script) {
     try {
       const result = execFileSync("npm", ["run", script, "--silent"], {
@@ -144,7 +173,11 @@ function localChecks(root: string): { ok: boolean; output: string[] } {
       output.push(error instanceof Error ? error.message : String(error));
     }
   } else {
-    output.push("nenhum script typecheck/check disponível");
+    output.push(
+      config.AUDIT_ALLOW_NPM_SCRIPTS
+        ? "nenhum script typecheck/check disponível"
+        : "scripts npm do alvo não executados (AUDIT_ALLOW_NPM_SCRIPTS=false)",
+    );
   }
   return { ok, output };
 }
@@ -228,11 +261,17 @@ export async function applyFinding(finding: Finding): Promise<ApplyResult> {
 
   try {
     backupFiles(run.id, finding.id, root, patch.files);
+    const originals = new Map<string, string>();
+    const updated = new Map<string, string>();
     for (const file of patch.files) {
       const abs = safeResolve(root, file);
       const original = readFileSync(abs, "utf8");
-      writeFileSync(abs, renderContent(patch, original), "utf8");
+      const next = renderContent(patch, original);
+      originals.set(file, original);
+      updated.set(file, next);
+      writeFileSync(abs, next, "utf8");
     }
+    assertUntouched(patch, originals, updated);
     const checks = localChecks(root);
     if (!checks.ok) {
       const restored = restoreBackup(run.id, finding.id, root);

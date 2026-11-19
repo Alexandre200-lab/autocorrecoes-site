@@ -1,9 +1,11 @@
 import { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config/index.js";
 import { runMigrations } from "./migrations.js";
 import type {
+  AuditOptions,
   AuditRun,
   Finding,
   Job,
@@ -11,6 +13,7 @@ import type {
   RawSignal,
   Receipt,
   RunStatus,
+  Severity,
   StoredEvent,
   TargetType,
 } from "../shared/types.js";
@@ -45,6 +48,7 @@ type RunRow = {
   error: string | null;
   checks_run: string;
   checks_not_run: string;
+  options: string;
 };
 
 type FindingRow = {
@@ -87,6 +91,7 @@ function toRun(row: RunRow, signals: RawSignal[]): AuditRun {
     error: row.error ?? undefined,
     checksRun: parse<string[]>(row.checks_run, []),
     checksNotRun: parse<string[]>(row.checks_not_run, []),
+    options: parse<AuditOptions>(row.options, {}),
     signals,
   };
 }
@@ -136,8 +141,8 @@ export const store = {
 
   createRun(run: AuditRun): void {
     db.prepare(
-      `INSERT INTO runs (id, target_type, target, started_at, status, base_commit, head_commit, checks_run, checks_not_run)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO runs (id, target_type, target, started_at, status, base_commit, head_commit, checks_run, checks_not_run, options)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       run.id,
       run.targetType,
@@ -148,6 +153,7 @@ export const store = {
       run.headCommit ?? null,
       JSON.stringify(run.checksRun),
       JSON.stringify(run.checksNotRun),
+      JSON.stringify(run.options ?? {}),
     );
   },
 
@@ -155,16 +161,25 @@ export const store = {
     id: string,
     patch: Partial<Pick<AuditRun, "status" | "finishedAt" | "error" | "checksRun" | "checksNotRun">>,
   ): void {
-    const current = db.prepare("SELECT checks_run, checks_not_run FROM runs WHERE id = ?").get(id) as
-      | { checks_run: string; checks_not_run: string }
+    const current = db
+      .prepare("SELECT status, finished_at, checks_run, checks_not_run FROM runs WHERE id = ?")
+      .get(id) as
+      | { status: string; finished_at: string | null; checks_run: string; checks_not_run: string }
       | undefined;
     if (!current) return;
+    const status = patch.status ?? current.status;
+    // Só altera finished_at quando o status termina; nunca força "completed"
+    // apenas porque o chamador atualizou outro campo (bug documentado no plano).
+    const finishedAt =
+      patch.finishedAt ??
+      (patch.status && patch.status !== "running"
+        ? new Date().toISOString()
+        : current.finished_at);
     db.prepare(
       `UPDATE runs SET status = ?, finished_at = ?, error = ?, checks_run = ?, checks_not_run = ? WHERE id = ?`,
     ).run(
-      patch.status ?? "completed",
-      patch.finishedAt ??
-        (patch.status && patch.status !== "running" ? new Date().toISOString() : null),
+      status,
+      finishedAt,
       patch.error ?? null,
       JSON.stringify(patch.checksRun ?? parse(current.checks_run, [])),
       JSON.stringify(patch.checksNotRun ?? parse(current.checks_not_run, [])),
@@ -343,6 +358,20 @@ export const store = {
       createdAt: String(row.created_at),
     }));
   },
+
+  /** Agregação única para /api/trends — evita N+1 queries por execução. */
+  countFindingsByRunAndSeverity(): Map<string, Record<Severity, number>> {
+    const rows = db
+      .prepare("SELECT run_id, severity, COUNT(*) AS total FROM findings GROUP BY run_id, severity")
+      .all() as Array<{ run_id: string; severity: Severity; total: number }>;
+    const result = new Map<string, Record<Severity, number>>();
+    for (const row of rows) {
+      const counts = result.get(row.run_id) ?? { P1: 0, P2: 0, P3: 0, P4: 0 };
+      counts[row.severity] = Number(row.total);
+      result.set(row.run_id, counts);
+    }
+    return result;
+  }
 
   // ---- Fila durável -------------------------------------------------------
 
@@ -550,5 +579,14 @@ export const store = {
 };
 
 export function newId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  return `${prefix}_${randomUUID()}`;
+}
+
+/** Fecha o SQLite (WAL) durante o desligamento gracioso. */
+export function closeDb(): void {
+  try {
+    db.close();
+  } catch {
+    // Já fechado — best effort.
+  }
 }

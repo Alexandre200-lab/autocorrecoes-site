@@ -7,14 +7,23 @@ import { deepSeekProvider, type AiProvider } from "./provider.js";
 import { PROMPT_VERSION, SYSTEM_VERIFIER, buildVerifierUserPrompt } from "./prompts/index.js";
 import { VerificationSchema, type Verification } from "./schemas.js";
 
-function stripFences(text: string): string {
-  const cleaned = text
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/, "")
-    .trim();
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  return start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned;
+import { stripFences } from "./json.js";
+
+/** Seleciona o sinal que deu origem ao achado — nunca um sinal arbitrário do domínio. */
+export function sourceSignal(run: AuditRun, finding: Finding) {
+  return (
+    run.signals.find(
+      (s) =>
+        Boolean(finding.sourceRuleId) &&
+        s.ruleId === finding.sourceRuleId &&
+        (!finding.path || s.path === finding.path),
+    ) ??
+    run.signals.find((s) => Boolean(finding.sourceRuleId) && s.ruleId === finding.sourceRuleId) ??
+    run.signals.find(
+      (s) => finding.path !== undefined && s.path === finding.path && s.line === finding.line,
+    ) ??
+    run.signals.find((s) => s.domain === finding.domain)
+  );
 }
 
 /**
@@ -27,7 +36,7 @@ export async function verify(
   provider: AiProvider = deepSeekProvider,
   modelOverride?: string,
 ): Promise<Verification | null> {
-  const signal = run.signals.find((s) => s.domain === finding.domain);
+  const signal = sourceSignal(run, finding);
   let raw: string;
   try {
     raw = await provider.complete({

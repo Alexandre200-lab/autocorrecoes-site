@@ -5,20 +5,34 @@ services:
     ports:
       - "4310:4310"
     environment:
+      NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 4310
       DATA_DIR: /app/data
+      # API_TOKEN é obrigatório em produção (fail-closed).
+      API_TOKEN: ${API_TOKEN:?Defina API_TOKEN antes de subir em produção}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-flash}
-      API_TOKEN: ${API_TOKEN:-}
       AI_BUDGET_USD: ${AI_BUDGET_USD:-2}
       DEEPSEEK_CONSENSUS_P1: ${DEEPSEEK_CONSENSUS_P1:-false}
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      AUDIT_ALLOWED_ROOTS: ${AUDIT_ALLOWED_ROOTS:-}
+      AUDIT_ALLOW_NPM_SCRIPTS: ${AUDIT_ALLOW_NPM_SCRIPTS:-false}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     volumes:
       - autocorrecoes-data:/app/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 2g
     restart: unless-stopped
 
 volumes:

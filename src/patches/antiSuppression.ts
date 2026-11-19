@@ -11,7 +11,7 @@ const SUPPRESSION_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /\bvisibility\s*:\s*collapse\b/i, reason: "visibility:collapse esconde o elemento" },
   { re: /\bopacity\s*:\s*0(?:\.0+)?(?![\d.])/i, reason: "opacity:0 esconde o elemento visualmente" },
   { re: /\bpointer-events\s*:\s*none\b/i, reason: "pointer-events:none desativa a interação" },
-  { re: /\binert\b/i, reason: "inert remove o elemento da árvore de acessibilidade" },
+  { re: /\binert\b(?=\s*(?:=|:|>|\/))/i, reason: "inert remove o elemento da árvore de acessibilidade" },
   { re: /\bdisableRules\b/i, reason: "disableRules desliga a regra do axe" },
   { re: /\beslint-disable\b/i, reason: "eslint-disable suprime o lint" },
   { re: /\b@ts-(ignore|nocheck|expect-error)\b/i, reason: "diretiva TypeScript suprime a checagem" },

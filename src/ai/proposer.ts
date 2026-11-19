@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { config } from "../config/index.js";
 import { logger } from "../observability/index.js";
 import { recordFinding } from "../observability/metrics.js";
@@ -11,27 +11,28 @@ import { resolveLocalTarget } from "../auditors/url.js";
 import { deepSeekProvider, type AiProvider } from "./provider.js";
 import { PROMPT_VERSION, SYSTEM_PROPOSER, buildProposerUserPrompt } from "./prompts/index.js";
 import { ProposalSchema, type ProposedFinding } from "./schemas.js";
+import { stripFences } from "./json.js";
 
 const CHUNK_SIZE = 10;
 const MAX_CONTEXT_CHARS = 18_000;
-
-function stripFences(text: string): string {
-  const cleaned = text
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/, "")
-    .trim();
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  return start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned;
-}
 
 function screenshotsFrom(context: string): string[] {
   const paths = new Set<string>();
   const re = /Screenshot(?:[^:]*):\s*(\S+\.png)/g;
   let match: RegExpExecArray | null;
   while ((match = re.exec(context)) !== null) paths.add(match[1]);
+  // Limita o tamanho total enviado ao modelo: screenshots fullPage podem ter
+  // dezenas de MB e estourar custo/memória imprevisivelmente.
+  const MAX_IMAGE_BYTES = 1_500_000;
+  let total = 0;
   return [...paths]
     .filter((p) => existsSync(p))
+    .filter((p) => {
+      const size = statSync(p).size;
+      if (total + size > MAX_IMAGE_BYTES) return false;
+      total += size;
+      return true;
+    })
     .slice(0, 2)
     .map((p) => `data:image/png;base64,${readFileSync(p).toString("base64")}`);
 }

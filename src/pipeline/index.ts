@@ -55,7 +55,7 @@ async function collect(
     events.emitEvent({ type: "audit:progress", runId, domain: auditor.domain, count: signals.length });
     const result = await span(
       `audit.${auditor.domain}`,
-      () => auditor.audit(target, options, ctx),
+      () => withTimeout(auditor.audit(target, options, ctx), config.AUDIT_TIMEOUT_MS, auditor.domain),
       { runId, traceId: ctx.traceId, domain: auditor.domain },
     );
     signals.push(...result.signals);
@@ -70,6 +70,18 @@ async function collect(
     checksNotRun,
     context: contexts.join("\n\n"),
   };
+}
+
+/** Limita o tempo total de cada auditor determinístico, inclusive Playwright/axe. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timeout de auditoria (${ms}ms): ${label}`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 export interface AuditOutcome {
@@ -107,6 +119,7 @@ export async function runAudit(
     signals: [],
     checksRun: [],
     checksNotRun: [],
+    options: auditOptions,
   };
   store.createRun(run);
   events.emitEvent({ type: "run:started", runId: id, target });
@@ -165,7 +178,7 @@ export async function runAudit(
 
     let findings: Finding[] = [];
     if (options.useAI !== false && config.apiKeyConfigured) {
-      resetBudget();
+      resetBudget(config.AI_BUDGET_USD, id);
       events.emitEvent({ type: "ai:proposing", runId: id });
       findings = await span(
         "ai.propose",
@@ -215,7 +228,7 @@ export async function runAudit(
     return {
       run: store.getRun(id) ?? run,
       findings: store.listFindings({ runId: id, limit: 500 }),
-      budget: getBudget(),
+      budget: getBudget(id),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -244,6 +257,7 @@ export async function reauditFinding(finding: Finding): Promise<ReauditOutcome> 
     [finding.domain],
     { runId: run.id, traceId },
     run.id,
+    run.options ?? {},
   );
 
   const persists = collected.signals.some(

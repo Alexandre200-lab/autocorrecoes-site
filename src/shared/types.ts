@@ -49,6 +49,8 @@ export interface AuditRun {
   /** Resumo dos checks executados por domínio (para o receipt). */
   checksRun: string[];
   checksNotRun: string[];
+  /** Opções originais da execução — preservadas para uma re-auditoria fiel. */
+  options?: AuditOptions;
 }
 
 export type PatchFormat = "unified-diff" | "full-file" | "css-rule" | "config-change";

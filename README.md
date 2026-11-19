@@ -86,7 +86,9 @@ npm start                    # API + dashboard em http://127.0.0.1:4310
 ### Docker
 
 ```bash
-# opcional: exporte DEEPSEEK_API_KEY e API_TOKEN antes
+# API_TOKEN é obrigatório em produção (fail-closed) e o compose falha sem ele.
+export API_TOKEN="$(openssl rand -hex 32)"
+# opcional: exporte DEEPSEEK_API_KEY
 docker compose up -d --build
 
 # API:  http://127.0.0.1:4310
@@ -146,7 +148,7 @@ O dashboard cobre o mesmo fluxo com aprovação visual, diff de patch, baseline 
 
 - **Design (URL):** axe-core com tags `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`, `wcag22aa` em desktop e mobile; contraste, labels, ARIA, imagens quebradas, overflow horizontal, `<html lang>`, `<h1>`, estado interativo (menu/modal), screenshots analisados pelo `deepseek-flash` com visão e scores Lighthouse (informativos, nunca gate).
 - **Backend (URL):** status HTTP, latência p95, headers de segurança (CSP, HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy), `X-Powered-By`, CORS curinga com credenciais, stack traces expostas e métodos mutantes via `OPTIONS` (opcional, desligado por padrão). Requisições padrão são `GET`.
-- **Código (path):** git HEAD e árvore suja, `npm run typecheck`/`lint`/`test` quando os scripts existem, `npm audit --audit-level=high`, secrets hardcoded, `console.log`, TODOs e `any` explícito.
+- **Código (path):** git HEAD e árvore suja, `npm run typecheck`/`lint`/`test` quando os scripts existem **e `AUDIT_ALLOW_NPM_SCRIPTS=true`**, `npm audit --audit-level=high`, secrets hardcoded, `console.log`, TODOs e `any` explícito. Por padrão, scripts do repositório auditado não são executados (geram o sinal `UNTRUSTED_SCRIPTS_SKIPPED`).
 
 > **Limite honesto:** ferramentas automáticas detectam apenas parte dos critérios WCAG. O bucket `incomplete` do axe vira item de revisão humana e nunca patch. Um relatório verde significa "sem regressões detectáveis", não "conformidade WCAG".
 
@@ -170,7 +172,15 @@ O dashboard cobre o mesmo fluxo com aprovação visual, diff de patch, baseline 
 | `DATA_DIR` | `./data` | SQLite, backups, screenshots e artefatos. |
 | `HOST` / `PORT` | `127.0.0.1` / `4310` | Bind da API. |
 | `AUDIT_TIMEOUT_MS` | `120000` | Timeout geral de auditoria. |
-| `RATE_LIMIT_MAX` | `120` | Requisições/min por identidade; `0` desliga. |
+| `RATE_LIMIT_MAX` | `120` | Requisições/min por identidade autenticada (ou IP); `0` desliga. |
+| `LOGIN_RATE_LIMIT_MAX` | `5` | Tentativas de login/min por IP; `0` desliga. |
+| `CORS_ORIGIN` | *(vazio)* | Origens permitidas (separadas por vírgula). Vazio = somente same-origin. |
+| `SSE_TICKET_TTL_MS` | `120000` | Validade do ticket de eventos (vinculado ao IP). |
+| `AUDIT_ALLOWED_ROOTS` | *(vazio)* | Raízes locais permitidas como alvo/baseline. |
+| `AUDIT_ALLOW_NPM_SCRIPTS` | `false` | Executa scripts npm do repositório auditado — **código arbitrário**, só habilite em repos confiáveis. |
+| `NODE_ENV` | `development` | `production` exige `API_TOKEN`. |
+| `ALLOW_INSECURE_NO_AUTH` | `false` | Escapa do fail-closed apenas em desenvolvimento controlado. |
+| `TRUST_PROXY` | `false` | Confia em `X-Forwarded-Proto` para marcar o cookie como `Secure`. |
 | `PLAYWRIGHT_HEADLESS` | `true` | Modo do Chromium. |
 | `PLAYWRIGHT_VIEWPORT` | `1440x900` | Viewport desktop. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | *(vazio)* | Ativa o SDK OpenTelemetry. |
@@ -265,7 +275,7 @@ Documentação interativa em `http://127.0.0.1:4310/docs` (OpenAPI gerado dos sc
 
 ### Autenticação
 
-Com `API_TOKEN` definido, todas as rotas exceto saúde/config/login/ticket exigem autenticação:
+Em `NODE_ENV=production`, o servidor **se recusa a iniciar sem `API_TOKEN`** (fail-closed). Com `API_TOKEN` definido, todas as rotas exceto saúde/config/login/ticket exigem autenticação:
 
 - **Dashboard:** `POST /api/auth/login` cria cookie **httpOnly + SameSite=Strict** (Secure atrás de HTTPS). O token nunca vai para `localStorage`.
 - **CLI/CI:** `Authorization: Bearer <token>`.
@@ -278,12 +288,14 @@ Com `API_TOKEN` definido, todas as rotas exceto saúde/config/login/ticket exige
 
 - Chave apenas em `.env`; nunca enviada ao alvo da auditoria.
 - **Redação de segredos** antes de qualquer trecho sair do processo, aplicada no auditor e no cliente de IA.
-- **SSRF:** hosts loopback/privados/link-local bloqueados por padrão; cada redirect é revalidado e o IP resolvido é fixado na conexão (anti DNS-rebinding), inclusive nas navegações do Playwright.
-- **Path traversal:** `safeResolve` usa `realpath`, bloqueando escapes por symlink.
+- **SSRF:** hosts loopback/privados/link-local e faixas IPv6 especiais bloqueados por padrão; cada redirect é revalidado e o IP resolvido é fixado nas requisições HTTP (anti DNS-rebinding). No navegador, cada requisição é filtrada por host — **o Chromium resolve DNS por conta própria**, portanto a proteção no Playwright é por host, não por IP fixado.
+- **Path traversal:** `safeResolve` usa `realpath`, bloqueando escapes por symlink; alvos locais de `/api/audit` e `/api/baseline` passam por `assertSafeAuditRoot` (diretórios de sistema bloqueados e allowlist opcional).
 - **Prompt injection:** conteúdo de código/HTML/diff é delimitado e tratado como dado, nunca como instrução.
-- **Anti-supressão:** regras léxicas + AST (PostCSS e Babel) bloqueiam patches que escondem o sintoma.
-- **Verificador independente:** não recebe o raciocínio do Proposer.
-- **Apply protegido:** backup, `git diff --check`, `npm run typecheck`, rollback automático em falha.
+- **Redação:** cobre secrets nomeados (com ou sem aspas), JWTs, `Bearer`, chaves `sk-`/AWS e PEM antes de qualquer prompt.
+- **Anti-supressão:** regras léxicas + AST (PostCSS e Babel, inclusive em `unified-diff`) bloqueiam patches que escondem o sintoma; `untouchedAssertion` é verificado no apply.
+- **Verificador independente:** não recebe o raciocínio do Proposer e usa o sinal de origem do achado.
+- **Apply protegido:** backup, verificação de `untouchedAssertion`, `git diff --check`, typecheck (quando habilitado) e rollback automático em falha.
+- **Rate limit:** chaveado por identidade autenticada ou IP (nunca por parâmetros de query); login possui limite próprio.
 - **Alvos remotos:** patches são exportados como artefatos; o servidor de terceiros nunca é modificado.
 
 Reporte vulnerabilidades conforme `SECURITY.md`.
@@ -331,8 +343,11 @@ O dataset `eval/cases.json` tem 21 casos rotulados de design/backend/código. O 
 - Não garante conformidade WCAG — apenas regressões detectáveis por automação.
 - Páginas que exigem login só são auditáveis com `auth.storageState`.
 - Auditoria de design exige uma URL; repositórios locais recebem apenas auditoria estática.
-- SQLite + eventos em memória atendem bem uma instância; múltiplas réplicas exigem Postgres/Redis.
-- O custo de IA cresce com o número de sinais e com o consenso P1; use `AI_BUDGET_USD`.
+- SQLite + eventos em memória atendem bem uma instância; múltiplas réplicas exigem Postgres/Redis (rate limit e tickets SSE também são locais ao processo).
+- O custo de IA cresce com o número de sinais e com o consenso P1; use `AI_BUDGET_USD` (por execução).
+- Scripts npm do alvo não são executados por padrão: a auditoria de código perde typecheck/lint/test até `AUDIT_ALLOW_NPM_SCRIPTS=true`.
+- O filtro SSRF do Playwright é por hostname; DNS rebinding no navegador não é mitigado por IP fixado.
+- Aplicação de patches é sequencial; um run com centenas de aprovados pode demorar bastante.
 
 ---
 
